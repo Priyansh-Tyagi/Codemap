@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  /* Ink & panel surfaces - a cartographer's-desk navy, not default Tailwind slate */
+  --color-ink-950: #0b0e14;
+  --color-ink-900: #12161f;
+  --color-ink-800: #1a1f2b;
+  --color-ink-700: #232838;
+  --color-ink-600: #323a4d;
+
+  /* Text */
+  --color-parchment-100: #e7e9f0;
+  --color-parchment-200: #cdd1dd;
+  --color-parchment-300: #b6bcca;
+  --color-parchment-400: #9aa1b3;
+  --color-parchment-500: #7c8397;
+  --color-parchment-600: #666d80;
+  --color-parchment-700: #565c6e;
+
+  /* Signature accent - brass/ochre, the one warm note in a cold-toned UI */
+  --color-brass-400: #d9a35e;
+  --color-brass-500: #c08a3f;
+  --color-brass-600: #a06f2c;
+
+  /* Semantic: circular dependency marker (sealing-wax red, not stock alert-red) */
+  --color-flag-400: #d17c78;
+  --color-flag-500: #b8544f;
+  --color-flag-600: #954440;
+
+  /* Semantic: quiet secondary signal */
+  --color-moss-400: #8fab8e;
+  --color-moss-500: #71906f;
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background-color: var(--color-ink-950);
+  font-family: var(--font-display);
+}
+
+/* Visible keyboard focus - not decorative, an accessibility floor */
+:focus-visible {
+  outline: 2px solid var(--color-brass-400);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

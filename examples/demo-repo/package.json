@@ -1,0 +1,6 @@
+{
+  "name": "codemap-demo-app",
+  "version": "1.0.0",
+  "description": "A small illustrative app for trying out CodeMap. Not a real product - built to exercise every CodeMap feature: multiple architecture categories, a genuine circular dependency, and one deliberately over-relied-on utility file.",
+  "private": true
+}
