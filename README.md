@@ -28,7 +28,9 @@ analysis, not guesswork.
 ## Features
 
 - **Repository scanning** — recursively finds `.js`/`.jsx`/`.ts`/`.tsx` files, skipping `node_modules`, `dist`, `build`, and similar directories at the directory-walk level (never even descends into them).
+- **Filter and focus** — narrow the graph and file tree by architecture category, minimum risk level, or folder (including subtree scoping); filtered-out nodes are removed from layout entirely rather than just dimmed, so a large repo actually declutters instead of just fading.
 - **Local or GitHub URL input** — analyze a directory on your own machine, or paste a public GitHub repo URL (`https://github.com/owner/repo`, optionally `/tree/branch`) and CodeMap downloads a one-shot tarball snapshot, analyzes it, and cleans up the temp files automatically. No `git clone`, no commit history fetched.
+- **GitHub result caching** — a repeat analysis of the same repo+ref within 10 minutes is served instantly from memory, skipping both the download and the re-parse entirely (a "Force refresh" checkbox bypasses this when you want fresh data sooner). Local paths are never cached — caching your own actively-edited files would risk silently showing stale results.
 - **AST-based import extraction** — uses Babel (`@babel/parser` + `@babel/traverse`) via a small Node subprocess, so JSX and TypeScript syntax are understood natively rather than approximated with regex.
 - **Local dependency resolution** — resolves relative imports to real files on disk, handling extension guessing and `index` files, with a project-root containment check so a crafted import can't resolve outside the analyzed directory.
 - **Interactive dependency graph** — rendered with React Flow, laid out with `dagre` (not naive column-stacking), colored by architecture category, with click-to-highlight for a node's direct dependencies/dependents.
@@ -197,22 +199,27 @@ FastAPI auto-generates interactive docs once the backend is running:
 
 ## Testing
 
-Backend: 80 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 85 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder, cycle detection, metrics, impact analysis, architecture
 classification, risk scoring, the GitHub fetcher (URL parsing, size guard,
 rate-limit handling, tar-slip protection — all mocked, network-independent),
-and full API integration (including a regression test for a route-ordering
-bug caught during development — see `backend/tests/test_api.py`).
+GitHub result caching (cache hits skip re-fetching, force-refresh bypasses
+the cache, local paths are never cached, entries expire after the TTL), and
+full API integration (including a regression test for a route-ordering bug
+caught during development — see `backend/tests/test_api.py`).
 
 ```powershell
 cd backend
 python -m pytest tests\ -v
 ```
 
-No automated frontend test suite; frontend logic that benefits from being
-pure and testable (file-tree building, dagre layout, feedback-edge
-detection) is factored into standalone functions in `frontend/src/utils/`
-rather than embedded in components, verified manually during development.
+Frontend: `vitest` covers pure logic factored out of components — currently
+the filter predicates (category/risk/folder, including combined-filter and
+folder-subtree-boundary cases). Run with `npm test` from `frontend/`. Not
+every piece of frontend logic has a matching test yet (dagre layout and
+feedback-edge detection were verified manually during development rather
+than committed as automated tests) - this is a real gap, not a claim that
+coverage is complete.
 
 ---
 

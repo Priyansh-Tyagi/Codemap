@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from graph.builder import build_dependency_graph
-from analyzer.github_fetcher import fetch_github_repo, GitHubFetchError
+from analyzer.github_fetcher import fetch_github_repo, parse_github_url, GitHubFetchError
 from models.schemas import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -40,8 +40,41 @@ def _node_to_out(record, node_id: str) -> NodeOut:
     )
 
 
+def _record_to_analyze_response(record, cached: bool) -> AnalyzeResponse:
+    return AnalyzeResponse(
+        projectId=record.project_id,
+        rootPath=record.root,
+        sourceType=record.source_type,
+        sourceLabel=record.source_label,
+        fileCount=record.graph.number_of_nodes(),
+        edgeCount=record.graph.number_of_edges(),
+        cycleCount=len(record.cycles),
+        externalDependencyCount=len(record.external_dependencies),
+        unresolvedImportCount=len(record.unresolved_imports),
+        cached=cached,
+    )
+
+
 @router.post("/analyze", response_model=AnalyzeResponse)
 def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
+    # GitHub sources only: check the cache BEFORE fetching anything. Cache
+    # key comes from parsing the URL locally (no network call), so a cache
+    # hit costs nothing - not even the metadata lookup that would otherwise
+    # count against the GitHub rate limit.
+    if request.githubUrl:
+        try:
+            owner, repo, ref = parse_github_url(request.githubUrl)
+        except GitHubFetchError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        cache_key = f"{owner}/{repo}@{ref or 'default'}"
+
+        if not request.forceRefresh:
+            cached_project_id = store.get_cached_github_project_id(cache_key)
+            if cached_project_id:
+                record = store.get_project(cached_project_id)
+                if record:
+                    return _record_to_analyze_response(record, cached=True)
+
     fetched = None
 
     if request.githubUrl:
@@ -67,17 +100,10 @@ def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
 
         record = store.create_project(build_result, source_type=source_type, source_label=source_label)
 
-        return AnalyzeResponse(
-            projectId=record.project_id,
-            rootPath=record.root,
-            sourceType=record.source_type,
-            sourceLabel=record.source_label,
-            fileCount=record.graph.number_of_nodes(),
-            edgeCount=record.graph.number_of_edges(),
-            cycleCount=len(record.cycles),
-            externalDependencyCount=len(record.external_dependencies),
-            unresolvedImportCount=len(record.unresolved_imports),
-        )
+        if request.githubUrl:
+            store.set_github_cache(cache_key, record.project_id)
+
+        return _record_to_analyze_response(record, cached=False)
     finally:
         # The graph is fully built and stored in memory at this point - the
         # extracted files themselves are no longer needed, whether analysis
@@ -120,7 +146,7 @@ def get_project_graph(project_id: str) -> GraphResponse:
     record = _get_record_or_404(project_id)
     nodes = [_node_to_out(record, n) for n in record.graph.nodes]
     edges = [
-        EdgeOut(source=u, target=v, type=data.get("type", "import"))
+        EdgeOut(source=u, target=v, type=data.get("type", "import"), symbols=data.get("symbols", []))
         for u, v, data in record.graph.edges(data=True)
     ]
     return GraphResponse(nodes=nodes, edges=edges)

@@ -14,6 +14,10 @@ from pydantic import BaseModel, Field, model_validator
 class AnalyzeRequest(BaseModel):
     path: str | None = Field(None, description="Absolute path to a local JS/TS repository")
     githubUrl: str | None = Field(None, description="GitHub repository URL, e.g. https://github.com/owner/repo")
+    forceRefresh: bool = Field(
+        False,
+        description="For GitHub sources only: bypass the cache and re-download even if a recent analysis exists.",
+    )
 
     @model_validator(mode="after")
     def exactly_one_source(self):
@@ -34,6 +38,7 @@ class AnalyzeResponse(BaseModel):
     cycleCount: int
     externalDependencyCount: int
     unresolvedImportCount: int
+    cached: bool = False  # true if this result was served from the GitHub cache, no re-fetch/re-parse
 
 
 class ProjectSummary(BaseModel):
@@ -70,6 +75,7 @@ class EdgeOut(BaseModel):
     source: str
     target: str
     type: str
+    symbols: list[str] = []
 
 
 class GraphResponse(BaseModel):

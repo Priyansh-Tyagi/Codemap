@@ -99,9 +99,17 @@ def build_dependency_graph(root_path: str) -> BuildResult:
                 # extension config) - add it defensively so the edge is valid.
                 graph.add_node(target_id, filePath=target_id, name=os.path.basename(target_id), linesOfCode=0)
 
+            symbols = imp.get("symbols", [])
             if graph.has_edge(source_id, target_id):
-                continue  # avoid duplicate edges when a file is imported twice
-            graph.add_edge(source_id, target_id, type=imp["type"])
+                # Same file imported more than once (e.g. two separate import
+                # statements, or an import plus a require of the same
+                # target): merge symbols instead of dropping the second
+                # statement's data entirely. Order preserved, no duplicates.
+                existing = graph.edges[source_id, target_id].get("symbols", [])
+                merged = existing + [s for s in symbols if s not in existing]
+                graph.edges[source_id, target_id]["symbols"] = merged
+                continue
+            graph.add_edge(source_id, target_id, type=imp["type"], symbols=symbols)
 
     return BuildResult(
         graph=graph,

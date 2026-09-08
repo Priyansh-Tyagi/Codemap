@@ -71,6 +71,62 @@ def test_no_duplicate_edges_for_repeated_import(tmp_path):
     result = build_dependency_graph(str(tmp_path))
     assert result.graph.number_of_edges() == 1
 
+    a_id = next(n for n in result.graph.nodes if n.endswith("a.js"))
+    b_id = next(n for n in result.graph.nodes if n.endswith("b.js"))
+    # both statements' symbols must survive the merge, not just the first
+    assert result.graph.edges[a_id, b_id]["symbols"] == ["x", "y"]
+
+
+def test_default_import_symbol_is_labeled_default(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.js").write_text("import Widget from './widget';\n")
+    (src / "widget.js").write_text("export default function Widget() {}\n")
+
+    result = build_dependency_graph(str(tmp_path))
+    a_id = next(n for n in result.graph.nodes if n.endswith("a.js"))
+    w_id = next(n for n in result.graph.nodes if n.endswith("widget.js"))
+    assert result.graph.edges[a_id, w_id]["symbols"] == ["default"]
+
+
+def test_named_import_reports_source_side_name_not_local_alias(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.js").write_text(
+        "import { createUser as makeUser } from './userService';\n"
+    )
+    (src / "userService.js").write_text("export function createUser() {}\n")
+
+    result = build_dependency_graph(str(tmp_path))
+    a_id = next(n for n in result.graph.nodes if n.endswith("a.js"))
+    s_id = next(n for n in result.graph.nodes if n.endswith("userService.js"))
+    # "createUser" (what the source file exports), not "makeUser" (the local alias)
+    assert result.graph.edges[a_id, s_id]["symbols"] == ["createUser"]
+
+
+def test_namespace_import_symbol_is_wildcard(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.js").write_text("import * as utils from './utils';\n")
+    (src / "utils.js").write_text("export function helper() {}\n")
+
+    result = build_dependency_graph(str(tmp_path))
+    a_id = next(n for n in result.graph.nodes if n.endswith("a.js"))
+    u_id = next(n for n in result.graph.nodes if n.endswith("utils.js"))
+    assert result.graph.edges[a_id, u_id]["symbols"] == ["*"]
+
+
+def test_require_destructure_captures_symbol_names(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.js").write_text("const { query, close } = require('./db');\n")
+    (src / "db.js").write_text("module.exports = { query() {}, close() {} };\n")
+
+    result = build_dependency_graph(str(tmp_path))
+    a_id = next(n for n in result.graph.nodes if n.endswith("a.js"))
+    db_id = next(n for n in result.graph.nodes if n.endswith("db.js"))
+    assert set(result.graph.edges[a_id, db_id]["symbols"]) == {"query", "close"}
+
 
 def test_cyclic_graph_has_expected_structure(cyclic_repo):
     result = build_dependency_graph(str(cyclic_repo))
