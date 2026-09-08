@@ -22,10 +22,7 @@ from datetime import datetime, timezone
 import networkx as nx
 
 from graph.builder import BuildResult
-from graph.cycles import detect_cycles, nodes_in_cycles
-from graph.metrics import compute_graph_metrics
-from graph.risk import compute_risk
-from analyzer.architecture import classify_architecture
+from graph.analysis import run_full_analysis
 
 # How long a GitHub-sourced analysis stays cached before a repeat request
 # re-fetches. Long enough that repeat clicks / multiple visitors analyzing
@@ -68,40 +65,22 @@ def create_project(
     source_type: str = "local",
     source_label: str | None = None,
 ) -> ProjectRecord:
-    """Runs cycle detection + metrics once, then caches everything under a new id."""
+    """Runs the shared analysis once, then caches everything under a new id."""
     graph = build_result.graph
-    cycles = detect_cycles(graph)
-    in_cycle_set = nodes_in_cycles(cycles)
-    metrics = compute_graph_metrics(graph)
-
-    architecture = {
-        node_id: classify_architecture(graph.nodes[node_id]["filePath"])
-        for node_id in graph.nodes
-    }
-
-    per_node_metrics = metrics["perNode"]
-    risk = {
-        node_id: compute_risk(
-            in_degree=per_node_metrics[node_id]["inDegree"],
-            degree_centrality=per_node_metrics[node_id]["degreeCentrality"],
-            lines_of_code=graph.nodes[node_id].get("linesOfCode", 0),
-            in_cycle=node_id in in_cycle_set,
-        )
-        for node_id in graph.nodes
-    }
+    analysis = run_full_analysis(graph)
 
     record = ProjectRecord(
         project_id=str(uuid.uuid4()),
         root=build_result.root,
         graph=graph,
-        cycles=cycles,
-        nodes_in_cycles=in_cycle_set,
-        metrics=metrics,
+        cycles=analysis["cycles"],
+        nodes_in_cycles=analysis["nodes_in_cycles"],
+        metrics=analysis["metrics"],
         external_dependencies=build_result.external_dependencies,
         unresolved_imports=build_result.unresolved_imports,
         parse_errors=build_result.parse_errors,
-        architecture=architecture,
-        risk=risk,
+        architecture=analysis["architecture"],
+        risk=analysis["risk"],
         source_type=source_type,
         source_label=source_label or build_result.root,
     )

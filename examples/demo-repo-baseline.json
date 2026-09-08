@@ -1,0 +1,31 @@
+{
+  "fileCount": 15,
+  "edgeCount": 23,
+  "cycles": [
+    {
+      "id": "cycle-0",
+      "chain": [
+        "src/services/userService.js",
+        "src/services/authService.js",
+        "src/services/userService.js"
+      ]
+    }
+  ],
+  "risk": {
+    "src/app.js": 11,
+    "src/controllers/userController.js": 14,
+    "src/controllers/orderController.js": 14,
+    "src/components/Footer.jsx": 5,
+    "src/components/Header.jsx": 8,
+    "src/hooks/useAuth.js": 8,
+    "src/services/userService.js": 44,
+    "src/services/authService.js": 38,
+    "src/services/orderService.js": 14,
+    "src/models/User.js": 5,
+    "src/models/Order.js": 5,
+    "src/utils/formatDate.js": 5,
+    "src/utils/validators.js": 32,
+    "src/routes/userRoutes.js": 11,
+    "src/routes/orderRoutes.js": 11
+  }
+}

@@ -1,0 +1,30 @@
+name: CodeMap Check
+
+# Self-contained demonstration of the CodeMap Action, running against the
+# bundled examples/demo-repo (see action.yml at the repo root). Points
+# "uses: ./" at this same repo's action.yml rather than a published,
+# versioned Action - fine for demonstrating the pattern within this repo;
+# see the README for how another repository would reference this Action
+# once it's published/tagged.
+
+"on":
+  pull_request:
+    paths:
+      - "examples/demo-repo/**"
+  workflow_dispatch: {} # allows manually triggering a run from the Actions tab
+
+jobs:
+  codemap-check:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # needed for the PR-comment step in action.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run CodeMap check
+        uses: ./
+        with:
+          path: examples/demo-repo
+          risk-threshold: '80'
+          fail-on-new-cycle: 'true'
+          baseline: examples/demo-repo-baseline.json

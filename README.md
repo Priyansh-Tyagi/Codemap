@@ -29,6 +29,7 @@ analysis, not guesswork.
 
 - **Repository scanning** — recursively finds `.js`/`.jsx`/`.ts`/`.tsx` files, skipping `node_modules`, `dist`, `build`, and similar directories at the directory-walk level (never even descends into them).
 - **Filter and focus** — narrow the graph and file tree by architecture category, minimum risk level, or folder (including subtree scoping); filtered-out nodes are removed from layout entirely rather than just dimmed, so a large repo actually declutters instead of just fading.
+- **GitHub Actions CI check** — the same analysis engine, wrapped as a CLI and a composite GitHub Action (`action.yml`), that gates a pull request on newly-introduced circular dependencies or files crossing a risk threshold, posting the result as a PR comment. See "CI/CD integration" below.
 - **Local or GitHub URL input** — analyze a directory on your own machine, or paste a public GitHub repo URL (`https://github.com/owner/repo`, optionally `/tree/branch`) and CodeMap downloads a one-shot tarball snapshot, analyzes it, and cleans up the temp files automatically. No `git clone`, no commit history fetched.
 - **GitHub result caching** — a repeat analysis of the same repo+ref within 10 minutes is served instantly from memory, skipping both the download and the re-parse entirely (a "Force refresh" checkbox bypasses this when you want fresh data sooner). Local paths are never cached — caching your own actively-edited files would risk silently showing stale results.
 - **AST-based import extraction** — uses Babel (`@babel/parser` + `@babel/traverse`) via a small Node subprocess, so JSX and TypeScript syntax are understood natively rather than approximated with regex.
@@ -164,6 +165,71 @@ These numbers came from actually running CodeMap against the repo, not
 estimates — rerun it yourself and you should see the same results (this
 demo repo can also serve as a quick regression check that nothing broke).
 
+## CI/CD integration
+
+CodeMap's analysis engine is also available as a CLI (`backend/app/cli.py`)
+and wrapped as a composite GitHub Action (`action.yml` at the repo root),
+so a PR can be gated on dependency-graph regressions, not just reviewed
+manually.
+
+### CLI usage
+
+Run from `backend/app/` (same convention as `uvicorn main:app`):
+
+```bash
+# Human-readable summary, no gating
+python cli.py analyze ../../examples/demo-repo
+
+# Fail (exit 1) if any file's risk score is 80 or above
+python cli.py analyze ../../examples/demo-repo --risk-threshold 80
+
+# Write a baseline snapshot (typically generated from your main branch)
+python cli.py analyze ../../examples/demo-repo --output baseline.json
+
+# Compare against that baseline, failing ONLY on a genuinely new cycle -
+# pre-existing circular dependencies don't block every future PR
+python cli.py analyze ../../examples/demo-repo --baseline baseline.json --fail-on-new-cycle
+
+# Machine-readable output for scripting, or PR-comment-ready markdown
+python cli.py analyze ../../examples/demo-repo --format json
+python cli.py analyze ../../examples/demo-repo --format markdown
+```
+
+Exit codes: `0` = passed, `1` = failed a gating check, `2` = couldn't
+analyze the path at all (bad argument, not an analysis result).
+
+### Using the Action in a workflow
+
+```yaml
+- uses: actions/checkout@v4
+- uses: <owner>/codemap@main   # or a local path via "uses: ./" within this repo
+  with:
+    path: src
+    risk-threshold: '80'
+    fail-on-new-cycle: 'true'
+    baseline: codemap-baseline.json
+```
+
+`.github/workflows/codemap-ci.yml` in this repo is a working, self-contained
+example: it runs the Action against `examples/demo-repo`, comparing against
+`examples/demo-repo-baseline.json` (generated the same way you'd generate
+one for a real project — run the CLI with `--output` against your default
+branch and commit the result).
+
+### What I could and couldn't verify from here
+
+Being direct about this rather than implying more confidence than is
+warranted: I fully tested the CLI itself (11 automated tests, all running
+the actual command as a subprocess — exit codes, baseline diffing, a
+genuinely-introduced new cycle correctly detected without false-flagging
+a pre-existing baselined one) and validated `action.yml`'s YAML structure
+and the exact shell logic each step runs. What I *couldn't* test from this
+sandbox is the parts that only exist inside a real GitHub Actions runner —
+the PR-comment-posting step (`actions/github-script`) needs a live GitHub
+API token and an actual pull request to post to. Push this to a real
+GitHub repo, open a PR that touches `examples/demo-repo/`, and that's the
+piece to watch for the first time.
+
 ## Capturing screenshots
 
 I can't capture browser screenshots directly, but here's exactly what to
@@ -199,14 +265,16 @@ FastAPI auto-generates interactive docs once the backend is running:
 
 ## Testing
 
-Backend: 85 tests covering the scanner, parser bridge, classifier, resolver,
-graph builder, cycle detection, metrics, impact analysis, architecture
+Backend: 100 tests covering the scanner, parser bridge, classifier, resolver,
+graph builder (including import-symbol capture and the duplicate-import
+merge behavior), cycle detection, metrics, impact analysis, architecture
 classification, risk scoring, the GitHub fetcher (URL parsing, size guard,
 rate-limit handling, tar-slip protection — all mocked, network-independent),
 GitHub result caching (cache hits skip re-fetching, force-refresh bypasses
-the cache, local paths are never cached, entries expire after the TTL), and
-full API integration (including a regression test for a route-ordering bug
-caught during development — see `backend/tests/test_api.py`).
+the cache, local paths are never cached, entries expire after the TTL), the
+CLI (11 subprocess-level tests covering exit codes, baseline diffing, and
+gating logic), and full API integration (including a regression test for a
+route-ordering bug caught during development — see `backend/tests/test_api.py`).
 
 ```powershell
 cd backend
