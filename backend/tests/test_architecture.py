@@ -52,3 +52,53 @@ def test_unclassified_file_returns_unknown():
 
 def test_case_insensitive():
     assert classify_architecture("SRC/COMPONENTS/Button.tsx") == "Component"
+
+
+def test_django_flat_layout_models_file():
+    """blog/models.py - no models/ FOLDER, just a file - would be missed by folder rules alone."""
+    assert classify_architecture("blog/models.py") == "Model"
+
+
+def test_django_flat_layout_views_file():
+    assert classify_architecture("blog/views.py") == "Controller"
+
+
+def test_django_flat_layout_urls_file():
+    assert classify_architecture("blog/urls.py") == "Route"
+
+
+def test_django_admin_file():
+    assert classify_architecture("blog/admin.py") == "Admin"
+
+
+def test_drf_serializers_file():
+    assert classify_architecture("blog/serializers.py") == "Serializer"
+
+
+def test_django_settings_file():
+    assert classify_architecture("myproject/settings.py") == "Config"
+
+
+def test_django_migrations_folder():
+    assert classify_architecture("blog/migrations/0001_initial.py") == "Migration"
+
+
+def test_django_management_commands_folder():
+    assert classify_architecture("blog/management/commands/seed_data.py") == "Command"
+
+
+def test_conftest_file():
+    assert classify_architecture("tests/conftest.py") == "Test"
+
+
+def test_filename_rule_takes_precedence_over_folder_rule():
+    """
+    A file named "views.py" sitting inside a folder that ALSO happens to
+    match a rule (here "utils/") should use the more specific filename
+    rule (Controller), not the folder rule (Util).
+    """
+    assert classify_architecture("myapp/utils/views.py") == "Controller"
+
+
+def test_plain_python_file_with_no_convention_is_unknown():
+    assert classify_architecture("myapp/helpers.py") == "Unknown"

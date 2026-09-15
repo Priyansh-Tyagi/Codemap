@@ -27,7 +27,8 @@ analysis, not guesswork.
 
 ## Features
 
-- **Repository scanning** — recursively finds `.js`/`.jsx`/`.ts`/`.tsx` files, skipping `node_modules`, `dist`, `build`, and similar directories at the directory-walk level (never even descends into them).
+- **Repository scanning** — recursively finds `.js`/`.jsx`/`.ts`/`.tsx`/`.py` files, skipping `node_modules`, `dist`, `build`, `__pycache__`, and similar directories at the directory-walk level (never even descends into them).
+- **JavaScript/TypeScript and Python support** — both languages are parsed, resolved, and graphed through entirely separate pipelines (Python's import system genuinely isn't "JS with different syntax": relative-import "level," dotted absolute paths, and no free syntactic marker for local-vs-external the way JS's `./` prefix gives you one) and merged into a single graph. A `.py` file and a `.js` file with the same base name can never accidentally link to each other — proven with a dedicated test, not just asserted. Python parsing uses the stdlib `ast` module directly, no subprocess needed.
 - **Filter and focus** — narrow the graph and file tree by architecture category, minimum risk level, or folder (including subtree scoping); filtered-out nodes are removed from layout entirely rather than just dimmed, so a large repo actually declutters instead of just fading.
 - **GitHub Actions CI check** — the same analysis engine, wrapped as a CLI and a composite GitHub Action (`action.yml`), that gates a pull request on newly-introduced circular dependencies or files crossing a risk threshold, posting the result as a PR comment. See "CI/CD integration" below.
 - **Local or GitHub URL input** — analyze a directory on your own machine, or paste a public GitHub repo URL (`https://github.com/owner/repo`, optionally `/tree/branch`) and CodeMap downloads a one-shot tarball snapshot, analyzes it, and cleans up the temp files automatically. No `git clone`, no commit history fetched.
@@ -38,15 +39,17 @@ analysis, not guesswork.
 - **Circular dependency detection** — finds every cycle via `networkx.simple_cycles`, and renders the cycle-closing edge as a distinct curved line rather than letting a standard layout algorithm mis-route it.
 - **Change-impact analysis** — reverse-graph traversal answering "what breaks if I change this file," split into direct and indirect dependents.
 - **Deterministic risk scoring** — a transparent 0–100 score per file (dependents + centrality + complexity + cycle membership), with human-readable reasons, not a black box.
-- **Architecture classification** — heuristic path-based categorization (Component, Service, Controller, Model, Util, Hook, Route, etc.).
+- **Architecture classification** — heuristic path-based categorization (Component, Service, Controller, Model, Util, Hook, Route, etc. for JS; plus Django/Flask-flavored categories for Python — Serializer, Migration, Command, Admin — including filename-exact rules like `views.py`/`models.py`/`urls.py` so Django's common flat per-app layout, with no subfolders at all, is still classified correctly).
 - **File tree + search** — browse by folder, or search to jump straight to a file and focus the graph on it.
 
 ## What CodeMap intentionally does NOT do
 
 Documented limitations, not oversights:
 
-- No bundler path-alias resolution (webpack `resolve.alias`, tsconfig `paths` like `@/components/Button`) — only relative (`./`, `../`) and absolute (`/`) specifiers resolve to local files today.
-- No Python or other non-JS/TS language support.
+- No bundler path-alias resolution (webpack `resolve.alias`, tsconfig `paths` like `@/components/Button`) — only relative (`./`, `../`) and absolute (`/`) specifiers resolve to local JS/TS files today.
+- Python resolution does not distinguish regular packages (with `__init__.py`) from implicit namespace packages (PEP 420) — any directory is treated as a valid package. Does not support a `src/`-layout Python project where the real package root is nested below the directory you point CodeMap at.
+- No re-export detection for Python (JS's `export { x } from "./y"` has a direct concept; Python's equivalent — importing something into `__init__.py` specifically so other code can import it from the package rather than the submodule — is a convention, not syntax, and isn't specially detected).
+- No support for other non-JS/TS/Python languages.
 - No git history analysis, and GitHub analysis is a snapshot at one ref (branch/commit), not a clone — no commit history is fetched or available.
 - GitHub repos over 200MB are rejected before download (configurable in `analyzer/github_fetcher.py`).
 - Unauthenticated GitHub API requests are capped at 60/hour per IP by GitHub itself — easy to hit on a shared or cloud IP (this was hit live while building the feature). Set a `GITHUB_TOKEN` environment variable (a plain personal access token, no special scopes needed for public repos) to raise that to 5,000/hour.
@@ -61,7 +64,7 @@ Documented limitations, not oversights:
 |---|---|
 | Frontend | React + Vite + Tailwind CSS v4 + React Flow + dagre + Axios |
 | Backend | Python + FastAPI |
-| Parsing | Node.js + `@babel/parser`/`@babel/traverse`, invoked as a one-shot subprocess |
+| Parsing | JS/TS: Node.js + `@babel/parser`/`@babel/traverse`, invoked as a one-shot subprocess. Python: stdlib `ast` module, called directly (no subprocess). |
 | Graph analysis | NetworkX |
 | Storage | In-memory (see limitations above) |
 
@@ -76,14 +79,17 @@ FastAPI — /api/analyze, /projects, /files, /impact, /cycles, /metrics
         ▼
 Analysis Engine (Python)
   ├─ File Scanner (os.walk + ignore rules)
-  ├─ Parser Bridge → subprocess → Node/Babel AST → imports JSON
-  ├─ Import Classifier (local vs external)
-  ├─ Path Resolver (extension/index resolution)
-  ├─ Architecture Classifier (path-based heuristic)
+  ├─ JS/TS pipeline: Parser Bridge → subprocess → Node/Babel AST → imports JSON
+  │    ├─ Import Classifier (local vs external)
+  │    └─ Path Resolver (extension/index resolution)
+  ├─ Python pipeline: stdlib `ast` → imports (no subprocess)
+  │    └─ Python Resolver (dotted-path + relative-level resolution;
+  │         classification and resolution are the same step here, unlike JS)
+  ├─ Architecture Classifier (path-based heuristic, JS + Django/Flask conventions)
   └─ Risk Scorer (dependents + centrality + complexity + cycles)
         │
         ▼
-Graph Engine (NetworkX)
+Graph Engine (NetworkX) — ONE graph merging both languages' output
   ├─ Cycle detection
   ├─ Centrality (degree always, betweenness if ≤1500 nodes)
   ├─ Dependency depth (cycle-safe DFS)
@@ -164,6 +170,21 @@ heavily-depended-on utility file. Actual output from analyzing it:
 These numbers came from actually running CodeMap against the repo, not
 estimates — rerun it yourself and you should see the same results (this
 demo repo can also serve as a quick regression check that nothing broke).
+
+## The Python demo repo
+
+`examples/demo-repo-python` is the Python twin of `demo-repo` above — the
+same route/controller/service/model layering, the same deliberate cycle
+pattern, the same over-relied-on validators file, rebuilt in Python
+specifically so the two demo repos give a genuine apples-to-apples
+comparison of CodeMap analyzing the same application shape in two
+languages. Actual output from analyzing it:
+
+- **18 files, 19 dependency edges, 1 circular dependency**
+- **Cycle:** `auth_service.py → user_service.py → auth_service.py` (same realistic pattern as the JS version — auth needs to look up users, user registration needs to issue tokens)
+- **Highest risk file:** `user_service.py` (Medium, 41/100)
+- **Categories represented:** Route, Controller, Service, Model, Util — using the Django/Flask-flavored classification rules, not the JS ones
+- **One genuine external dependency detected:** `datetime` (stdlib, from `utils/formatting.py`) — correctly distinguished from the project's own local modules
 
 ## CI/CD integration
 
@@ -265,16 +286,21 @@ FastAPI auto-generates interactive docs once the backend is running:
 
 ## Testing
 
-Backend: 100 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 138 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
-classification, risk scoring, the GitHub fetcher (URL parsing, size guard,
-rate-limit handling, tar-slip protection — all mocked, network-independent),
-GitHub result caching (cache hits skip re-fetching, force-refresh bypasses
-the cache, local paths are never cached, entries expire after the TTL), the
-CLI (11 subprocess-level tests covering exit codes, baseline diffing, and
-gating logic), and full API integration (including a regression test for a
-route-ordering bug caught during development — see `backend/tests/test_api.py`).
+classification (including Django's flat-file conventions), risk scoring,
+the GitHub fetcher (URL parsing, size guard, rate-limit handling, tar-slip
+protection — all mocked, network-independent), GitHub result caching
+(cache hits skip re-fetching, force-refresh bypasses the cache, local paths
+are never cached, entries expire after the TTL), the Python parser and
+resolver (every import form, relative-level directory walking, local vs.
+external classification, the project-root containment guard), a dedicated
+cross-language integration suite (a `.py` and `.js` file sharing a base
+name provably never link to each other), the CLI (11 subprocess-level tests
+covering exit codes, baseline diffing, and gating logic), and full API
+integration (including a regression test for a route-ordering bug caught
+during development — see `backend/tests/test_api.py`).
 
 ```powershell
 cd backend

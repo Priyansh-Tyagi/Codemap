@@ -22,6 +22,11 @@ const CATEGORY_COLORS = {
   Config: "#8C93A8",    // slate grey
   Util: "#7CC6A0",      // sage
   Test: "#9FD35F",      // lime
+  // Python/Django-flavored categories (Phase D)
+  Serializer: "#D98CC2", // pink
+  Migration: "#A0826D",  // brown - "this changes the database", deliberately earthy/heavier
+  Command: "#7BA88A",    // moss
+  Admin: "#C2A15C",      // ochre
   Unknown: "#5B6272",   // neutral
 };
 

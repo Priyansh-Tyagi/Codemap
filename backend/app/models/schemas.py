@@ -58,6 +58,7 @@ class NodeOut(BaseModel):
     id: str
     filePath: str
     name: str
+    language: str = "javascript"
     linesOfCode: int
     inDegree: int
     outDegree: int

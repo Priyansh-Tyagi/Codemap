@@ -46,6 +46,7 @@ function FileSpec({ node }) {
       </div>
 
       <dl className="mt-4 divide-y divide-ink-700 border-y border-ink-700">
+        <Row label="Language" value={node.language === "python" ? "Python" : "JavaScript/TS"} />
         <Row label="Lines of code" value={node.linesOfCode} />
         <Row label="Depends on" value={node.outDegree} />
         <Row label="Depended on by" value={node.inDegree} />

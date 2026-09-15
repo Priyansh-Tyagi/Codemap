@@ -24,7 +24,8 @@ DEFAULT_IGNORE_DIRS = {
     "__pycache__",
 }
 
-SUPPORTED_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx"}
+SUPPORTED_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".py"}
+PYTHON_EXTENSIONS = {".py"}
 
 
 @dataclass

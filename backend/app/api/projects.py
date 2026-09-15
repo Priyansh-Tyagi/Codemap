@@ -26,6 +26,7 @@ def _node_to_out(record, node_id: str) -> NodeOut:
         id=node_id,
         filePath=data["filePath"],
         name=data["name"],
+        language=data.get("language", "javascript"),
         linesOfCode=data.get("linesOfCode", 0),
         inDegree=node_metrics.get("inDegree", 0),
         outDegree=node_metrics.get("outDegree", 0),
