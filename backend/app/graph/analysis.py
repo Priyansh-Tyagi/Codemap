@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import networkx as nx
 
-from graph.cycles import detect_cycles, nodes_in_cycles
+from graph.cycles import detect_cycles_capped, cyclic_components
 from graph.metrics import compute_graph_metrics
 from graph.risk import compute_risk
 from analyzer.architecture import classify_architecture
@@ -25,15 +25,21 @@ def run_full_analysis(graph: nx.DiGraph) -> dict:
     """
     Returns:
         {
-            "cycles": [...],                      # from detect_cycles
-            "nodes_in_cycles": {...},              # set of node ids
+            "cycles": [...],                      # capped list of elementary cycles
+            "cycles_truncated": bool,              # True if more cycles exist than listed
+            "cycle_components": [[node_id, ...]],  # groups of mutually-dependent files
+            "nodes_in_cycles": {...},              # set of node ids (exact, from components)
             "metrics": {...},                      # from compute_graph_metrics
             "architecture": {node_id: category},
             "risk": {node_id: {"score", "level", "reasons"}},
         }
     """
-    cycles = detect_cycles(graph)
-    in_cycle_set = nodes_in_cycles(cycles)
+    cycles, cycles_truncated = detect_cycles_capped(graph)
+    components = cyclic_components(graph)
+    # Exact membership from components, NOT from the (possibly capped) cycle
+    # list - a file must never lose its "in a cycle" flag/risk just because
+    # the listing was truncated.
+    in_cycle_set = {node_id for comp in components for node_id in comp}
     metrics = compute_graph_metrics(graph)
 
     architecture = {
@@ -54,6 +60,8 @@ def run_full_analysis(graph: nx.DiGraph) -> dict:
 
     return {
         "cycles": cycles,
+        "cycles_truncated": cycles_truncated,
+        "cycle_components": components,
         "nodes_in_cycles": in_cycle_set,
         "metrics": metrics,
         "architecture": architecture,

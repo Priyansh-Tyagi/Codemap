@@ -51,13 +51,54 @@ function splitFeedbackEdges(nodes, edges) {
   return { forward, feedback };
 }
 
+const GRID_GAP_X = 24;
+const GRID_GAP_Y = 20;
+const GRID_SEPARATION = 80; // space between the connected graph and the isolated-files grid
+
 /**
- * Computes {x, y} positions via dagre (ranked on forward edges only) and
- * returns which edges were held back as feedback edges, so the caller can
- * style/route those differently.
+ * Lays isolated files (no import edges to or from any other visible file) out
+ * in a compact grid. Left to dagre, every one of them lands on rank 0 and they
+ * stack into a single enormous column - on a real repo (Flask: 60+ isolated
+ * files) that column dwarfs the actual dependency graph and pushes it
+ * off-screen. A grid keeps them visible but out of the way.
+ */
+function layoutIsolatedGrid(isolatedNodes, originX, originY, targetWidth) {
+  const cellW = NODE_WIDTH + GRID_GAP_X;
+  const cellH = NODE_HEIGHT + GRID_GAP_Y;
+  const count = isolatedNodes.length;
+  const byWidth = Math.floor(targetWidth / cellW);
+  const bySquare = Math.ceil(Math.sqrt(count * 1.5));
+  const cols = Math.max(1, Math.min(count, Math.max(byWidth, bySquare)));
+
+  const positions = new Map();
+  isolatedNodes.forEach((node, i) => {
+    positions.set(node.id, {
+      x: originX + (i % cols) * cellW,
+      y: originY + Math.floor(i / cols) * cellH,
+    });
+  });
+  return positions;
+}
+
+/**
+ * Computes {x, y} positions: connected files via dagre (ranked on forward
+ * edges only), isolated files in a grid below. Returns which edges were held
+ * back as feedback edges, so the caller can style/route those differently.
  */
 export function layoutWithDagre(nodes, edges, direction = "LR") {
-  const { forward, feedback } = splitFeedbackEdges(nodes, edges);
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const visibleEdges = edges.filter(
+    (e) => e.source !== e.target && nodeIds.has(e.source) && nodeIds.has(e.target)
+  );
+  const connectedIds = new Set();
+  for (const e of visibleEdges) {
+    connectedIds.add(e.source);
+    connectedIds.add(e.target);
+  }
+  const connectedNodes = nodes.filter((n) => connectedIds.has(n.id));
+  const isolatedNodes = nodes.filter((n) => !connectedIds.has(n.id));
+
+  const { forward, feedback } = splitFeedbackEdges(connectedNodes, visibleEdges);
 
   const g = new dagre.graphlib.Graph();
   g.setGraph({
@@ -69,21 +110,35 @@ export function layoutWithDagre(nodes, edges, direction = "LR") {
   });
   g.setDefaultEdgeLabel(() => ({}));
 
-  for (const node of nodes) {
+  for (const node of connectedNodes) {
     g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
   }
   for (const edge of forward) {
-    if (g.hasNode(edge.source) && g.hasNode(edge.target)) {
-      g.setEdge(edge.source, edge.target);
-    }
+    g.setEdge(edge.source, edge.target);
   }
 
-  dagre.layout(g);
+  if (connectedNodes.length > 0) dagre.layout(g);
 
   const positions = new Map();
-  for (const node of nodes) {
+  let minX = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const node of connectedNodes) {
     const { x, y } = g.node(node.id);
-    positions.set(node.id, { x: x - NODE_WIDTH / 2, y: y - NODE_HEIGHT / 2 });
+    const pos = { x: x - NODE_WIDTH / 2, y: y - NODE_HEIGHT / 2 };
+    positions.set(node.id, pos);
+    minX = Math.min(minX, pos.x);
+    maxX = Math.max(maxX, pos.x + NODE_WIDTH);
+    maxY = Math.max(maxY, pos.y + NODE_HEIGHT);
+  }
+
+  if (isolatedNodes.length > 0) {
+    const hasConnected = connectedNodes.length > 0;
+    const grid = layoutIsolatedGrid(
+      isolatedNodes,
+      hasConnected ? minX : 0,
+      hasConnected ? maxY + GRID_SEPARATION : 0,
+      hasConnected ? maxX - minX : 0
+    );
+    for (const [id, pos] of grid) positions.set(id, pos);
   }
 
   const feedbackEdgeKeys = new Set(feedback.map((e) => `${e.source}->${e.target}`));

@@ -105,6 +105,7 @@ function GraphViewInner({ nodes, edges, onNodeClick, selectedNodeId }, ref) {
       onNodeClick={(_, node) => onNodeClick?.(node.data.node)}
       onPaneClick={() => onNodeClick?.(null)}
       fitView
+      minZoom={0.05}
       proOptions={{ hideAttribution: true }}
     >
       <Background color="#161a24" gap={28} size={1} />

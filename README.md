@@ -53,7 +53,8 @@ Documented limitations, not oversights:
 - No git history analysis, and GitHub analysis is a snapshot at one ref (branch/commit), not a clone — no commit history is fetched or available.
 - GitHub repos over 200MB are rejected before download (configurable in `analyzer/github_fetcher.py`).
 - Unauthenticated GitHub API requests are capped at 60/hour per IP by GitHub itself — easy to hit on a shared or cloud IP (this was hit live while building the feature). Set a `GITHUB_TOKEN` environment variable (a plain personal access token, no special scopes needed for public repos) to raise that to 5,000/hour.
-- Project data lives in server memory (a plain dict) — restarting the backend loses every analyzed project. Fine for a local tool you run yourself; not suitable for a multi-user deployment as-is.
+- Projects are stored in a single SQLite file with no expiry or eviction — it grows with every analysis (roughly a few MB for a 100-file repo) and is never pruned. Fine for a personal tool or a demo; a public deployment would need a retention policy. SQLite also assumes one server process (see Persistence below).
+- Listed circular dependencies are capped at 200 (shortest first) with a "200+" indicator; whether a file is *in* a cycle is always exact. See "Scaling behavior" below.
 - Betweenness centrality is skipped above 1500 files in a single repo (returned as `null`) to avoid an expensive computation on very large codebases; degree centrality is always computed.
 
 ---
@@ -66,7 +67,7 @@ Documented limitations, not oversights:
 | Backend | Python + FastAPI |
 | Parsing | JS/TS: Node.js + `@babel/parser`/`@babel/traverse`, invoked as a one-shot subprocess. Python: stdlib `ast` module, called directly (no subprocess). |
 | Graph analysis | NetworkX |
-| Storage | In-memory (see limitations above) |
+| Storage | SQLite (stdlib `sqlite3`, no ORM) — persistent, shareable project links |
 
 ## Architecture
 
@@ -284,9 +285,46 @@ FastAPI auto-generates interactive docs once the backend is running:
 
 ---
 
+## Persistence and shareable links
+
+Every analysis is saved to a SQLite file and gets a permanent URL, `/p/<projectId>`. Open that URL in any browser and the full interactive view loads from the stored analysis — no re-analysis, nothing to type. The "Copy link" button in the project header copies it.
+
+- **Where the file lives:** `CODEMAP_DB_PATH` (default `./codemap.db` in the backend's working directory). Tables are created lazily on first use, never at import time.
+- **Why SQLite, not Postgres:** one process, almost no concurrent writes, and each project is one row of JSON. The tool that fits is the simpler one.
+- **What is (and isn't) cached:** GitHub analyses are cached for 10 minutes per repo+ref (persisted, so the cache also survives restarts). Local paths are never cached — caching a folder you're actively editing would silently show stale results.
+- **Proof it persists:** `backend/tests/test_persistence.py` runs real separate Python processes that share only the DB file, and importing the store is tested to not create a database file as a side effect.
+
+### Deployment caveat: ephemeral disks
+
+Most hosts (Render, Railway, Fly) give a web service a filesystem that is **wiped on every redeploy**. With the default DB path, every redeploy silently deletes every stored project — and every link you've shared then shows "Project not found."
+
+Fix: attach a persistent disk/volume and point `CODEMAP_DB_PATH` at it. A Render blueprint is included as `render.yaml` (disk mounted at `/var/data`, `CODEMAP_DB_PATH=/var/data/codemap.db`). Two constraints follow from this design:
+
+- **One instance only.** A persistent disk attaches to a single instance, and SQLite is a single-writer database. Don't scale the backend horizontally.
+- **Persistent disks are typically a paid-plan feature** — confirm your host's current requirements and pricing.
+
+I have not deployed `render.yaml` to a real Render account; treat it as a starting point and verify it (in particular that Node.js is available in the Python runtime for the parser's `npm install`).
+
+### Client-side routing on static hosts
+
+Deep links like `/p/abc123` are handled by the React app, so a hard page load needs the host to serve `index.html` for unknown paths. `frontend/public/_redirects` (Netlify) and `frontend/vercel.json` (Vercel) are included. Verified locally: a hard load of `/p/<id>` against a production build returns the app, not a 404.
+
+---
+
+## Scaling behavior (found by analyzing real repos)
+
+Running CodeMap against real projects (Express, 141 files; Flask, 83 files) found two problems the small demo repos could never show:
+
+1. **Cycle explosion.** Flask's 19-file core has 9,629 distinct elementary cycles. Listing them is unreadable, and enumerating them is unbounded-cost on denser graphs. Now: membership in a cycle comes from strongly connected components (exact, linear time); the listed cycles are capped at 200, shortest first, chosen deterministically, with a `cyclesTruncated` flag and a "200+" display. The CLI's baseline diff compares whole tangled clusters instead of individual cycles when truncated, so unrelated changes can't make a PR check flap.
+2. **Layout blow-up.** dagre puts every unconnected file on one rank, so Flask's 60+ isolated files became a single column thousands of pixels tall, pushing the real dependency graph off-screen. Now isolated files are laid out in a compact grid below the connected graph.
+
+Measured (this sandbox): Express 1.6s and Flask 0.24s to analyze end to end. Large repos beyond ~150 files have not been tested.
+
+---
+
 ## Testing
 
-Backend: 138 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 152 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,
@@ -300,20 +338,26 @@ cross-language integration suite (a `.py` and `.js` file sharing a base
 name provably never link to each other), the CLI (11 subprocess-level tests
 covering exit codes, baseline diffing, and gating logic), and full API
 integration (including a regression test for a route-ordering bug caught
-during development — see `backend/tests/test_api.py`).
+during development — see `backend/tests/test_api.py`), SQLite persistence
+across real process boundaries, and cycle-detection scaling (dense-graph
+capping, exact membership, cross-process determinism, baseline-diff
+stability when truncated).
 
 ```powershell
 cd backend
 python -m pytest tests\ -v
 ```
 
-Frontend: `vitest` covers pure logic factored out of components — currently
-the filter predicates (category/risk/folder, including combined-filter and
-folder-subtree-boundary cases). Run with `npm test` from `frontend/`. Not
-every piece of frontend logic has a matching test yet (dagre layout and
-feedback-edge detection were verified manually during development rather
-than committed as automated tests) - this is a real gap, not a claim that
-coverage is complete.
+Frontend: 34 `vitest` tests (jsdom + Testing Library) covering the filter
+predicates, the dagre layout (isolated-file grid, no overlaps, feedback
+edges), the HomePage analyze-then-navigate flow, the ProjectPage
+fetch-by-URL / not-found / backend-down / copy-link (including clipboard
+failure) states, and the project stats panel. Run with `npm test` from
+`frontend/`.
+
+Known gap: React Flow itself is stubbed in the page tests (jsdom has no
+layout engine), so canvas rendering is verified separately in a real
+browser, not by the automated suite.
 
 ---
 
@@ -327,10 +371,13 @@ deploy the backend, "local path" means *that server's* files, not the
 visitor's laptop. GitHub URL mode is what makes a public demo link work for
 anyone else.)
 
-**Backend** — Render or Railway (free tiers exist as of writing; confirm
-current pricing yourself). Both support a standard `uvicorn` process.
+**Backend** — Render or Railway (confirm current pricing and plan
+requirements yourself). Both support a standard `uvicorn` process. **Attach
+a persistent disk and set `CODEMAP_DB_PATH` (see "Persistence" above) or
+every redeploy deletes all saved projects and shared links.**
 Set the start command to `uvicorn main:app --host 0.0.0.0 --port $PORT`
 from `backend/app/`, and set these environment variables:
+- `CODEMAP_DB_PATH` — a path on the persistent disk, e.g. `/var/data/codemap.db`
 - `CODEMAP_ALLOWED_ORIGINS` — your deployed frontend's URL (comma-separated if more than one)
 - `GITHUB_TOKEN` — strongly recommended for a public deployment; without it, GitHub's 60-requests/hour limit is shared across *every visitor* hitting your deployed backend from the same server IP, and will get exhausted fast. A token (no special scopes needed for public repos) raises that to 5,000/hour.
 
@@ -342,8 +389,8 @@ environment variable to your deployed backend's URL (see
 `frontend/.env.example`).
 
 Neither platform choice is load-bearing — any host that runs a persistent
-Python process (not just serverless functions, since this uses an
-in-memory store and spawns subprocesses) works for the backend, and any
+Python process with a persistent disk (not just serverless functions,
+since this uses a local SQLite file and spawns subprocesses) works for the backend, and any
 static host works for the frontend.
 
 ---

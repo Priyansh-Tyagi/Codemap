@@ -35,7 +35,9 @@ class AnalyzeResponse(BaseModel):
     sourceLabel: str  # local abs path, or "owner/repo@ref" for GitHub
     fileCount: int
     edgeCount: int
-    cycleCount: int
+    cycleCount: int  # number of cycles LISTED (capped; see cyclesTruncated)
+    cyclesTruncated: bool = False
+    cyclicComponentCount: int = 0  # groups of mutually-dependent files
     externalDependencyCount: int
     unresolvedImportCount: int
     cached: bool = False  # true if this result was served from the GitHub cache, no re-fetch/re-parse
@@ -48,7 +50,9 @@ class ProjectSummary(BaseModel):
     sourceLabel: str
     fileCount: int
     edgeCount: int
-    cycleCount: int
+    cycleCount: int  # number of cycles LISTED (capped; see cyclesTruncated)
+    cyclesTruncated: bool = False
+    cyclicComponentCount: int = 0  # groups of mutually-dependent files
     highRiskCount: int
     avgDependencies: float
     createdAt: str

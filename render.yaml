@@ -1,0 +1,23 @@
+# Render blueprint for the CodeMap backend. NOT yet tested on a real Render
+# account - verify before relying on it. The disk is what keeps saved
+# projects and shared links alive across redeploys; it requires a paid plan
+# and pins the service to a single instance (SQLite is single-writer).
+services:
+  - type: web
+    name: codemap-api
+    runtime: python
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt && cd parser && npm install
+    startCommand: cd app && uvicorn main:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: codemap-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: CODEMAP_DB_PATH
+        value: /var/data/codemap.db
+      - key: CODEMAP_ALLOWED_ORIGINS
+        sync: false   # set to your deployed frontend URL
+      - key: GITHUB_TOKEN
+        sync: false   # optional but strongly recommended (raises 60/hr -> 5,000/hr)

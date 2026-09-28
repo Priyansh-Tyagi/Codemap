@@ -257,8 +257,10 @@ def test_cache_expires_after_ttl(client, cyclic_repo, monkeypatch):
     assert fetch_call_count[0] == 1
 
     # simulate time passing beyond the TTL by back-dating the cache entry directly
-    for key, (project_id, _cached_at) in list(store_module._github_cache.items()):
-        store_module._github_cache[key] = (project_id, 0)  # epoch 0 = long expired
+    conn = store_module._connect()
+    with conn:
+        conn.execute("UPDATE github_cache SET cached_at = 0")  # epoch 0 = long expired
+    conn.close()
 
     client.post("/api/analyze", json={"githubUrl": "https://github.com/someone/app"})
     assert fetch_call_count[0] == 2  # expired entry triggered a real re-fetch

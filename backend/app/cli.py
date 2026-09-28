@@ -28,6 +28,8 @@ import argparse
 import json
 import sys
 
+import networkx as nx
+
 from graph.builder import build_dependency_graph
 from graph.analysis import run_full_analysis
 
@@ -42,6 +44,55 @@ def _cycle_key_set(cycles: list[dict]) -> set[frozenset[str]]:
     return {frozenset(c["chain"][:-1]) for c in cycles}
 
 
+def _components_from_cycles(cycles: list[dict]) -> list[frozenset[str]]:
+    """
+    Derives cyclic components from a list of cycles (for baselines written
+    before components were stored). The union of all cycle edges has exactly
+    the same strongly connected components as the original graph.
+    """
+    g = nx.DiGraph()
+    for c in cycles:
+        chain = c["chain"]
+        g.add_edges_from(zip(chain, chain[1:]))
+    return [
+        frozenset(comp)
+        for comp in nx.strongly_connected_components(g)
+        if len(comp) > 1 or any(g.has_edge(n, n) for n in comp)
+    ]
+
+
+def _find_new_cycles(analysis: dict, baseline: dict | None) -> list[frozenset[str]]:
+    """
+    Normal case: compare individual cycles against the baseline's cycles.
+
+    If EITHER side's cycle list was truncated (dense repo, more cycles than
+    are listed), per-cycle comparison would flap - which subset gets listed
+    can change when unrelated code changes, failing PRs that introduced
+    nothing. So fall back to comparing cyclic components: a component is
+    "new" only if it isn't contained in any baseline component (i.e. it's a
+    genuinely new tangle, or an existing tangle that grew).
+    """
+    if baseline is None:
+        baseline = {"cycles": []}
+
+    if analysis["cycles_truncated"] or baseline.get("cyclesTruncated"):
+        current = [frozenset(c) for c in analysis["cycle_components"]]
+        if "cycleComponents" in baseline:
+            base = [frozenset(c) for c in baseline["cycleComponents"]]
+        else:
+            base = _components_from_cycles(baseline["cycles"])
+        return [c for c in current if not any(c <= b for b in base)]
+
+    current_keys = _cycle_key_set(analysis["cycles"])
+    baseline_keys = _cycle_key_set(baseline["cycles"])
+    return [k for k in current_keys if k not in baseline_keys]
+
+
+def _cycle_count_label(serialized: dict) -> str:
+    n = len(serialized["cycles"])
+    return f"{n}+" if serialized.get("cyclesTruncated") else str(n)
+
+
 def _serialize_analysis(graph, analysis: dict) -> dict:
     """A stable, comparable JSON shape - this is what --output writes and
     what --baseline reads back in on a later run."""
@@ -49,6 +100,8 @@ def _serialize_analysis(graph, analysis: dict) -> dict:
         "fileCount": graph.number_of_nodes(),
         "edgeCount": graph.number_of_edges(),
         "cycles": analysis["cycles"],
+        "cyclesTruncated": analysis["cycles_truncated"],
+        "cycleComponents": analysis["cycle_components"],
         "risk": {node_id: r["score"] for node_id, r in analysis["risk"].items()},
     }
 
@@ -77,9 +130,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     new_cycles: list[frozenset[str]] = []
     if args.fail_on_new_cycle:
-        current_keys = _cycle_key_set(analysis["cycles"])
-        baseline_keys = _cycle_key_set(baseline["cycles"]) if baseline else set()
-        new_cycles = [k for k in current_keys if k not in baseline_keys]
+        new_cycles = _find_new_cycles(analysis, baseline)
 
     high_risk_files: list[tuple[str, int]] = []
     if args.risk_threshold is not None:
@@ -110,6 +161,7 @@ def _print_json_report(serialized, new_cycles, high_risk_files, passed) -> None:
                 "fileCount": serialized["fileCount"],
                 "edgeCount": serialized["edgeCount"],
                 "cycleCount": len(serialized["cycles"]),
+                "cyclesTruncated": serialized.get("cyclesTruncated", False),
                 "newCycles": [sorted(c) for c in new_cycles],
                 "highRiskFiles": [{"file": f, "score": s} for f, s in high_risk_files],
             },
@@ -122,7 +174,7 @@ def _print_text_report(serialized, new_cycles, high_risk_files, passed, args) ->
     print(
         f"CodeMap analysis: {serialized['fileCount']} files, "
         f"{serialized['edgeCount']} dependencies, "
-        f"{len(serialized['cycles'])} circular dependencies"
+        f"{_cycle_count_label(serialized)} circular dependencies"
     )
     print()
 
@@ -152,7 +204,7 @@ def _print_markdown_report(serialized, new_cycles, high_risk_files, passed, args
         "### CodeMap Analysis",
         "",
         f"**{serialized['fileCount']} files &middot; {serialized['edgeCount']} dependencies "
-        f"&middot; {len(serialized['cycles'])} circular dependencies**",
+        f"&middot; {_cycle_count_label(serialized)} circular dependencies**",
         "",
     ]
 

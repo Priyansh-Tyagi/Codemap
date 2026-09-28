@@ -100,7 +100,13 @@ function ProjectStats({ stats }) {
       <dl className="mt-2 divide-y divide-ink-700 border-y border-ink-700">
         <Row label="Files" value={stats.fileCount} />
         <Row label="Dependencies" value={stats.edgeCount} />
-        <Row label="Circular cycles" value={stats.cycleCount} />
+        <Row
+          label="Circular cycles"
+          value={stats.cyclesTruncated ? `${stats.cycleCount}+` : stats.cycleCount}
+        />
+        {stats.cyclicComponentCount > 0 && (
+          <Row label="Tangled clusters" value={stats.cyclicComponentCount} />
+        )}
         <Row label="High-risk files" value={stats.highRiskCount} />
         <Row label="Avg. dependencies" value={stats.avgDependencies} />
       </dl>
