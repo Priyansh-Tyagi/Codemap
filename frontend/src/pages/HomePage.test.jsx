@@ -95,4 +95,17 @@ describe("HomePage", () => {
 
     expect(analyzeRepository).not.toHaveBeenCalled();
   });
+
+  it("reports a bare server 500 as a server error, not as 'backend unreachable'", async () => {
+    analyzeRepository.mockRejectedValue({ response: { status: 500, data: "Internal Server Error" } });
+    const user = userEvent.setup();
+    renderHome();
+
+    await user.type(screen.getByLabelText("Repository source"), "https://github.com/o/r");
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("server returned an error (500)");
+    expect(alert).not.toHaveTextContent("Couldn't reach");
+  });
 });

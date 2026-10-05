@@ -8,6 +8,7 @@ import FileTree from "../components/FileTree";
 import FilterPanel from "../components/FilterPanel";
 import ImpactPanel from "../components/ImpactPanel";
 import { getProjectGraph, getProjectSummary } from "../services/api";
+import { describeApiError } from "../utils/apiError";
 import { emptyFilters, computeVisibleNodeIds } from "../utils/filterNodes";
 
 export default function ProjectPage() {
@@ -17,6 +18,7 @@ export default function ProjectPage() {
 
   // "loading" | "ready" | "notfound" | "error"
   const [status, setStatus] = useState("loading");
+  const [errorMessage, setErrorMessage] = useState("");
   const [graph, setGraph] = useState(null);
   const [stats, setStats] = useState(null);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
@@ -43,7 +45,12 @@ export default function ProjectPage() {
       })
       .catch((err) => {
         if (cancelled) return;
-        setStatus(err.response?.status === 404 ? "notfound" : "error");
+        if (err.response?.status === 404) {
+          setStatus("notfound");
+        } else {
+          setErrorMessage(describeApiError(err));
+          setStatus("error");
+        }
       });
 
     return () => {
@@ -134,9 +141,7 @@ export default function ProjectPage() {
           <CenterMessage>Loading project…</CenterMessage>
         )}
         {status === "error" && (
-          <CenterMessage>
-            Couldn't reach the backend. Is it running on port 8000?
-          </CenterMessage>
+          <CenterMessage>{errorMessage}</CenterMessage>
         )}
         {status === "ready" && (
           <>

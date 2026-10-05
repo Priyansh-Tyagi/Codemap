@@ -119,7 +119,8 @@ def _process_python_files(graph, parsed_files, root, external_dependencies, unre
 
         for imp in file_result.get("imports", []):
             resolved, kind = resolve_python_import(
-                file_result["filePath"], imp["module_path"], imp["level"], root
+                file_result["filePath"], imp["module_path"], imp["level"], root,
+                is_bare_dot_name=(imp.get("symbols") == ["*"]),
             )
 
             if kind == ResolutionKind.EXTERNAL:

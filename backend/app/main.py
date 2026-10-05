@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import FastAPI
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import projects, files, graph
 
+logger = logging.getLogger("codemap")
 app = FastAPI(
     title="CodeMap API",
     description="Interactive codebase intelligence & dependency analyzer",
@@ -34,3 +36,21 @@ app.include_router(graph.router, prefix="/api")
 @app.get("/api/health")
 def health_check() -> dict:
     return {"status": "ok"}
+
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request: Request, exc: Exception):
+    """
+    Any unexpected failure still returns JSON with a `detail`, so the UI can
+    say "the server hit an error" instead of guessing the backend is down.
+    The full traceback stays in the server log.
+    """
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error ({type(exc).__name__}). Check the backend log."},
+    )

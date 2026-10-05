@@ -15,6 +15,7 @@ endpoint returns the whole snapshot in one request.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -23,6 +24,10 @@ import tempfile
 from dataclasses import dataclass
 
 import requests
+
+from analyzer.scanner import DEFAULT_IGNORE_DIRS, SUPPORTED_EXTENSIONS
+
+logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
 MAX_REPO_SIZE_KB = 200_000  # ~200MB - generous for MVP-sized repos, rejects huge monorepos
@@ -100,26 +105,54 @@ def _get_repo_metadata(owner: str, repo: str) -> dict:
     return resp.json()
 
 
-def _safe_extract(tar: tarfile.TarFile, dest: str) -> None:
+def _wanted_member(member: tarfile.TarInfo) -> bool:
     """
-    Guards against a maliciously-crafted tarball using '../' entries to write
-    outside the intended extraction directory ("tar slip"). Standard
-    precaution when extracting an archive from an external source, even a
-    normally-trustworthy one like GitHub.
+    Only extract what the scanner would ever read: regular files with a
+    supported source extension that are not inside an ignored directory.
+    Everything else (images, fixtures, node_modules, docs assets) is pure
+    cost - and on Windows it is also a liability, because one file whose
+    full path exceeds the 260-character MAX_PATH limit used to abort the
+    entire analysis (seen live on a repo with a very long test-fixture name).
+    """
+    if not member.isfile():
+        return False
+    parts = member.name.split("/")
+    # parts[0] is GitHub's top-level "owner-repo-<sha>" directory
+    if any(part in DEFAULT_IGNORE_DIRS or part.startswith(".") for part in parts[1:-1]):
+        return False
+    return os.path.splitext(parts[-1])[1] in SUPPORTED_EXTENSIONS
+
+
+def _safe_extract(tar: tarfile.TarFile, dest: str) -> int:
+    """
+    Extracts the source files from the tarball into dest and returns how many
+    wanted files could not be written (e.g. path too long on Windows).
+
+    Two protections: a manual check that no entry escapes dest via '../'
+    ("tar slip"), plus tarfile's own filter="data" where available. A single
+    unwritable file is skipped and counted rather than failing the whole
+    analysis.
     """
     dest_abs = os.path.abspath(dest)
-    for member in tar.getmembers():
+    members = tar.getmembers()
+    for member in members:
         member_path = os.path.abspath(os.path.join(dest, member.name))
         if not (member_path == dest_abs or member_path.startswith(dest_abs + os.sep)):
             raise GitHubFetchError("Tarball contains an unsafe path, refusing to extract")
-    try:
-        # filter="data" (Python 3.12+) is tarfile's own built-in protection
-        # against unsafe members - belt-and-suspenders alongside the manual
-        # check above. Falls back gracefully on older Python where the
-        # `filter` kwarg doesn't exist yet.
-        tar.extractall(dest, filter="data")
-    except TypeError:
-        tar.extractall(dest)
+
+    skipped = 0
+    for member in members:
+        if not _wanted_member(member):
+            continue
+        try:
+            try:
+                tar.extract(member, dest, filter="data")
+            except TypeError:  # Python < 3.12 has no `filter` kwarg
+                tar.extract(member, dest)
+        except OSError as exc:
+            logger.warning("Skipping %s: %s", member.name, exc)
+            skipped += 1
+    return skipped
 
 
 def fetch_github_repo(url: str) -> FetchedRepo:
@@ -152,8 +185,10 @@ def fetch_github_repo(url: str) -> FetchedRepo:
                 f.write(chunk)
 
         with tarfile.open(tarball_path, "r:gz") as tar:
-            _safe_extract(tar, tmp_dir)
+            skipped = _safe_extract(tar, tmp_dir)
         os.remove(tarball_path)
+        if skipped:
+            logger.warning("%s/%s: %d source file(s) could not be extracted", owner, repo, skipped)
 
         # GitHub tarballs contain exactly one top-level directory (e.g. "owner-repo-<sha>/")
         entries = [e for e in os.listdir(tmp_dir) if os.path.isdir(os.path.join(tmp_dir, e))]
@@ -162,6 +197,9 @@ def fetch_github_repo(url: str) -> FetchedRepo:
 
         extracted_root = os.path.join(tmp_dir, entries[0])
         return FetchedRepo(local_path=extracted_root, owner=owner, repo=repo, ref=resolved_ref)
+    except (tarfile.TarError, OSError) as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise GitHubFetchError(f"Could not unpack {owner}/{repo}: {exc}") from exc
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise

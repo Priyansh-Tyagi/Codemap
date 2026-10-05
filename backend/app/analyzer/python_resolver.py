@@ -66,7 +66,8 @@ def _within_project_root(resolved_abs: str, project_root: str) -> bool:
 
 
 def resolve_python_import(
-    importing_file: str, module_path: str, level: int, project_root: str
+    importing_file: str, module_path: str, level: int, project_root: str,
+    is_bare_dot_name: bool = False,
 ) -> tuple[str | None, str]:
     """
     Returns (resolved_absolute_path_or_None, ResolutionKind).
@@ -74,6 +75,15 @@ def resolve_python_import(
     module_path: dotted path, e.g. "foo.bar" (never comma-separated - the
         parser already flattened multi-name imports into separate records).
     level: 0 for an absolute import, N for N dots of relative-ness.
+    is_bare_dot_name: True for `from . import name` (parser's symbols==["*"]
+        case). There, module_path is actually the imported NAME, not
+        necessarily a submodule - Python resolves it as a submodule if one
+        exists, but otherwise as an attribute already defined in the
+        containing package's __init__.py (a very common pattern: a package
+        builds a singleton in __init__.py, e.g. `calibre_db = CalibreDB()`,
+        and sibling modules do `from . import calibre_db`). Only this bare
+        form gets that fallback - `from .foo import x` requires `foo` itself
+        to be a real module, so it must resolve on its own.
     """
     if level == 0:
         base_dir = os.path.abspath(project_root)
@@ -84,6 +94,16 @@ def resolve_python_import(
     candidate_base = os.path.normpath(os.path.join(base_dir, *segments))
 
     resolved = _try_module_file(candidate_base) or _try_package_init(candidate_base)
+
+    if resolved is None and is_bare_dot_name and level > 0:
+        # Not a submodule - try the containing package's own __init__.py,
+        # in case `name` is an attribute defined there instead. Skip this
+        # when the importing file IS that __init__.py: a name it can't find
+        # in itself isn't suddenly found by "importing itself", and treating
+        # it as resolved would create a false self-loop edge.
+        init_candidate = _try_package_init(base_dir)
+        if init_candidate and os.path.abspath(init_candidate) != os.path.abspath(importing_file):
+            resolved = init_candidate
 
     if resolved is None:
         # Absolute import that didn't resolve = treat as a third-party/stdlib

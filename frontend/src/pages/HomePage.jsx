@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Wordmark from "../components/Wordmark";
 import { analyzeRepository } from "../services/api";
+import { describeApiError } from "../utils/apiError";
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -27,8 +28,7 @@ export default function HomePage() {
       // identically.
       navigate(`/p/${result.projectId}`, { state: { cached: Boolean(result.cached) } });
     } catch (err) {
-      const detail = err.response?.data?.detail;
-      setError(detail || "Couldn't reach the backend. Is it running on port 8000?");
+      setError(describeApiError(err));
       setLoading(false);
     }
   }

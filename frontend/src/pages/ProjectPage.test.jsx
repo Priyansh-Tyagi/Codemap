@@ -118,4 +118,14 @@ describe("ProjectPage", () => {
       expect(screen.getByText(/No JavaScript, TypeScript, or Python files/)).toBeInTheDocument()
     );
   });
+
+  it("shows the server's error for a 500 on load instead of claiming the backend is down", async () => {
+    const boom = { response: { status: 500, data: { detail: "Internal server error (KeyError)." } } };
+    getProjectGraph.mockRejectedValue(boom);
+    getProjectSummary.mockRejectedValue(boom);
+    renderAt("/p/abc");
+
+    expect(await screen.findByText("Internal server error (KeyError).")).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't reach/)).not.toBeInTheDocument();
+  });
 });

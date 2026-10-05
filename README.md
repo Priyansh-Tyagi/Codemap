@@ -289,7 +289,7 @@ FastAPI auto-generates interactive docs once the backend is running:
 
 Every analysis is saved to a SQLite file and gets a permanent URL, `/p/<projectId>`. Open that URL in any browser and the full interactive view loads from the stored analysis — no re-analysis, nothing to type. The "Copy link" button in the project header copies it.
 
-- **Where the file lives:** `CODEMAP_DB_PATH` (default `./codemap.db` in the backend's working directory). Tables are created lazily on first use, never at import time.
+- **Where the file lives:** `CODEMAP_DB_PATH` if set; otherwise `backend/app/codemap.db`, anchored to that directory regardless of where you launch `uvicorn` from. (Earlier this defaulted to `./codemap.db` relative to the process's working directory - starting the server from a slightly different directory between sessions, e.g. a new terminal or an IDE run config, silently created a second, empty database, which looked exactly like "persistence doesn't work." Fixed; see `backend/tests/test_db_path_default.py`.) Tables are created lazily on first use, never at import time. You do not need to set `CODEMAP_DB_PATH` yourself for local development - it's only there for deployment, where you point it at a persistent disk (see below).
 - **Why SQLite, not Postgres:** one process, almost no concurrent writes, and each project is one row of JSON. The tool that fits is the simpler one.
 - **What is (and isn't) cached:** GitHub analyses are cached for 10 minutes per repo+ref (persisted, so the cache also survives restarts). Local paths are never cached — caching a folder you're actively editing would silently show stale results.
 - **Proof it persists:** `backend/tests/test_persistence.py` runs real separate Python processes that share only the DB file, and importing the store is tested to not create a database file as a side effect.
@@ -311,6 +311,43 @@ Deep links like `/p/abc123` are handled by the React app, so a hard page load ne
 
 ---
 
+## Fixes from testing real repos
+
+Three more problems, found by running CodeMap against real GitHub
+repositories (Flask, Express, [crocodilestick/Calibre-Web-Automated](https://github.com/crocodilestick/Calibre-Web-Automated) — 395 files, Python+JS) instead of only the small bundled demo repos.
+
+**1. A long filename crashed the entire GitHub analysis.** Calibre-Web-
+Automated contains a test fixture with a 150+ character filename. Combined
+with a temp-directory path, Python's `tarfile.extractall` raised
+`FileNotFoundError` on Windows (MAX_PATH) — and on any OS, since filenames
+are capped around 255 bytes regardless. One unwritable file failed the
+*entire* analysis with a bare 500. Fixed two ways: extraction now skips
+files the scanner would never read anyway (filtering to supported source
+extensions before extracting, not after — faster too), and a single file
+that still can't be written is skipped and counted rather than aborting.
+
+**2. A bare 500 told the user the backend was "unreachable."** The frontend
+treated "no response" and "server responded with an error" as the same
+case. A crash now gets its own FastAPI exception handler that always
+returns JSON with a `detail`, and the frontend distinguishes "can't reach
+the backend" from "the server returned an error ($status)" — see
+`frontend/src/utils/apiError.js`.
+
+**3. A common Python pattern was flagged as 75 broken imports.** Calibre-
+Web-Automated's `cps/duplicates.py` does
+`from . import db, calibre_db, csrf, config, helper`. `db.py` and
+`helper.py` are real files; `calibre_db`, `csrf`, and `config` are
+instances built in `cps/__init__.py` (`calibre_db = CalibreDB()`) and
+re-exported — a common way to expose package-level singletons. The
+resolver assumed every bare `from . import name` must be its own file. Now,
+when that fails, it falls back to the containing package's `__init__.py`
+(guarded against a false self-loop when `__init__.py` imports from itself).
+Python unresolved-import count on that repo: 75 → 1 (the one that's left is
+a genuine third-party package). `from .foo import x` is unaffected — `foo`
+must still resolve as a real module there.
+
+---
+
 ## Scaling behavior (found by analyzing real repos)
 
 Running CodeMap against real projects (Express, 141 files; Flask, 83 files) found two problems the small demo repos could never show:
@@ -318,13 +355,19 @@ Running CodeMap against real projects (Express, 141 files; Flask, 83 files) foun
 1. **Cycle explosion.** Flask's 19-file core has 9,629 distinct elementary cycles. Listing them is unreadable, and enumerating them is unbounded-cost on denser graphs. Now: membership in a cycle comes from strongly connected components (exact, linear time); the listed cycles are capped at 200, shortest first, chosen deterministically, with a `cyclesTruncated` flag and a "200+" display. The CLI's baseline diff compares whole tangled clusters instead of individual cycles when truncated, so unrelated changes can't make a PR check flap.
 2. **Layout blow-up.** dagre puts every unconnected file on one rank, so Flask's 60+ isolated files became a single column thousands of pixels tall, pushing the real dependency graph off-screen. Now isolated files are laid out in a compact grid below the connected graph.
 
-Measured (this sandbox): Express 1.6s and Flask 0.24s to analyze end to end. Large repos beyond ~150 files have not been tested.
+Measured (this sandbox): Express (141 files) 1.6s, Flask (83 files) 0.24s,
+Calibre-Web-Automated (395 files, Python+JS) 13.2s end to end — almost all
+of that last one is the one-shot Node/Babel subprocess parsing ~196 JS
+files (12.4s of the 13.2s, profiled with `cProfile`). That subprocess is
+unchanged from Phase 1; it hasn't been a bottleneck until a repo this size.
+If it becomes one, the fix is parsing in a persistent Node process instead
+of spawning fresh each time — not yet done.
 
 ---
 
 ## Testing
 
-Backend: 152 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 167 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,
@@ -339,16 +382,20 @@ name provably never link to each other), the CLI (11 subprocess-level tests
 covering exit codes, baseline diffing, and gating logic), and full API
 integration (including a regression test for a route-ordering bug caught
 during development — see `backend/tests/test_api.py`), SQLite persistence
-across real process boundaries, and cycle-detection scaling (dense-graph
+across real process boundaries, cycle-detection scaling (dense-graph
 capping, exact membership, cross-process determinism, baseline-diff
-stability when truncated).
+stability when truncated), the default DB path being independent of the
+process's launch directory, GitHub tarball extraction (unwritable files
+skipped and counted rather than crashing the whole analysis, path-traversal
+still rejected, unexpected errors always return JSON), and a Python import
+resolver fix (see "Fixes from testing real repos" below).
 
 ```powershell
 cd backend
 python -m pytest tests\ -v
 ```
 
-Frontend: 34 `vitest` tests (jsdom + Testing Library) covering the filter
+Frontend: 40 `vitest` tests (jsdom + Testing Library) covering the filter
 predicates, the dagre layout (isolated-file grid, no overlaps, feedback
 edges), the HomePage analyze-then-navigate flow, the ProjectPage
 fetch-by-URL / not-found / backend-down / copy-link (including clipboard

@@ -41,7 +41,15 @@ from graph.analysis import run_full_analysis
 # user may be editing would silently serve stale results.
 GITHUB_CACHE_TTL_SECONDS = 600  # 10 minutes
 
-DEFAULT_DB_PATH = "codemap.db"
+# Anchored to this file's own directory (backend/app/), NOT the process's
+# current working directory. A relative path resolved against cwd meant
+# starting uvicorn from a slightly different directory between sessions
+# (a new terminal, an IDE run config, anything that didn't cd to the exact
+# same place) silently created a second, empty database - which looks
+# exactly like "persistence doesn't work" from the outside.
+# store.py lives at backend/app/services/store.py - two levels up is backend/app.
+_APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DB_PATH = os.path.join(_APP_DIR, "codemap.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
