@@ -41,6 +41,7 @@ class AnalyzeResponse(BaseModel):
     externalDependencyCount: int
     unresolvedImportCount: int
     cached: bool = False  # true if this result was served from the GitHub cache, no re-fetch/re-parse
+    isPrivate: bool = False
 
 
 class ProjectSummary(BaseModel):
@@ -56,6 +57,7 @@ class ProjectSummary(BaseModel):
     highRiskCount: int
     avgDependencies: float
     createdAt: str
+    isPrivate: bool = False
 
 
 class NodeOut(BaseModel):

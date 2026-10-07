@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Wordmark from "../components/Wordmark";
+import AuthStatus from "../components/AuthStatus";
 import { analyzeRepository } from "../services/api";
 import { describeApiError } from "../utils/apiError";
 
@@ -11,6 +12,7 @@ export default function HomePage() {
   const [forceRefresh, setForceRefresh] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [authError] = useState(() => new URLSearchParams(window.location.search).get("auth_error"));
 
   async function handleAnalyze(e) {
     e.preventDefault();
@@ -37,6 +39,8 @@ export default function HomePage() {
     <div className="h-screen w-screen flex flex-col bg-ink-950">
       <header className="flex items-center gap-3 px-4 h-14 border-b border-ink-700 bg-ink-900 flex-shrink-0">
         <Wordmark />
+        <div className="flex-1" />
+        <AuthStatus />
       </header>
 
       <main className="flex-1 flex items-center justify-center px-4">
@@ -87,6 +91,17 @@ export default function HomePage() {
             </label>
           )}
 
+          {sourceMode === "github" && (
+            <p className="mt-3 text-[11px] text-parchment-600 leading-relaxed">
+              Sign in with GitHub for your own private repos and a higher rate limit.
+            </p>
+          )}
+
+          {authError && (
+            <p role="alert" className="mt-4 text-flag-400 text-[12px] font-mono break-words">
+              {authError}
+            </p>
+          )}
           {error && (
             <p role="alert" className="mt-4 text-flag-400 text-[12px] font-mono break-words">
               {error}

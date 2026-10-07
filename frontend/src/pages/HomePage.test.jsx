@@ -6,6 +6,11 @@ import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 vi.mock("../services/api", () => ({
   analyzeRepository: vi.fn(),
 }));
+vi.mock("../services/auth", () => ({
+  getCurrentUser: vi.fn().mockResolvedValue(null),
+  logout: vi.fn(),
+  redirectToGitHubLogin: vi.fn(),
+}));
 
 import { analyzeRepository } from "../services/api";
 import HomePage from "./HomePage";
@@ -107,5 +112,10 @@ describe("HomePage", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("server returned an error (500)");
     expect(alert).not.toHaveTextContent("Couldn't reach");
+  });
+
+  it("shows the GitHub sign-in control in the header", async () => {
+    renderHome();
+    expect(await screen.findByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
   });
 });

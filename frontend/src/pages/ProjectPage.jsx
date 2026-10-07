@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import Wordmark from "../components/Wordmark";
+import AuthStatus from "../components/AuthStatus";
 import GraphView from "../components/GraphView";
 import DetailsPanel from "../components/DetailsPanel";
 import ImportsPanel from "../components/ImportsPanel";
@@ -111,7 +112,13 @@ export default function ProjectPage() {
             {stats.sourceLabel}
           </span>
         )}
+        {stats?.isPrivate && (
+          <span className="text-[10px] font-mono uppercase tracking-wide text-brass-400 border border-brass-800 rounded-sm px-1.5 py-0.5">
+            Private
+          </span>
+        )}
         <div className="flex-1" />
+        <AuthStatus />
         {justAnalyzedCached && status === "ready" && (
           <span className="text-[11px] font-mono text-brass-400 whitespace-nowrap">
             served from cache

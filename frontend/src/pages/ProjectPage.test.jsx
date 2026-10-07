@@ -17,6 +17,11 @@ vi.mock("../components/GraphView", async () => {
   };
 });
 vi.mock("../components/ImpactPanel", () => ({ default: () => null }));
+vi.mock("../services/auth", () => ({
+  getCurrentUser: vi.fn().mockResolvedValue(null),
+  logout: vi.fn(),
+  redirectToGitHubLogin: vi.fn(),
+}));
 
 import { getProjectGraph, getProjectSummary } from "../services/api";
 import ProjectPage from "./ProjectPage";
@@ -127,5 +132,20 @@ describe("ProjectPage", () => {
 
     expect(await screen.findByText("Internal server error (KeyError).")).toBeInTheDocument();
     expect(screen.queryByText(/Couldn't reach/)).not.toBeInTheDocument();
+  });
+
+  it("shows a Private badge only when the project is private", async () => {
+    getProjectGraph.mockResolvedValue({ nodes: [node("a.js")], edges: [] });
+    getProjectSummary.mockResolvedValue({ ...summary, isPrivate: true });
+    renderAt("/p/abc");
+    expect(await screen.findByText("Private")).toBeInTheDocument();
+  });
+
+  it("shows no Private badge for a public project", async () => {
+    getProjectGraph.mockResolvedValue({ nodes: [node("a.js")], edges: [] });
+    getProjectSummary.mockResolvedValue({ ...summary, isPrivate: false });
+    renderAt("/p/abc");
+    await screen.findByTestId("graph");
+    expect(screen.queryByText("Private")).not.toBeInTheDocument();
   });
 });

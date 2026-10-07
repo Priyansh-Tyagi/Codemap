@@ -97,7 +97,7 @@ def test_path_traversal_is_still_rejected(tmp_path):
 
 
 def test_unexpected_server_error_returns_json_detail_not_bare_500(monkeypatch):
-    def boom(_url):
+    def boom(_url, access_token=None):
         raise RuntimeError("kaboom")
     monkeypatch.setattr("api.projects.fetch_github_repo", boom)
     client = TestClient(app, raise_server_exceptions=False)

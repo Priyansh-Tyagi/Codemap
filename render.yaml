@@ -20,4 +20,15 @@ services:
       - key: CODEMAP_ALLOWED_ORIGINS
         sync: false   # set to your deployed frontend URL
       - key: GITHUB_TOKEN
-        sync: false   # optional but strongly recommended (raises 60/hr -> 5,000/hr)
+        sync: false   # optional but recommended for anonymous visitors (raises 60/hr -> 5,000/hr)
+      - key: CODEMAP_FRONTEND_URL
+        sync: false   # only if offering GitHub sign-in - your deployed frontend's URL
+      - key: CODEMAP_GITHUB_CLIENT_ID
+        sync: false   # only if offering GitHub sign-in
+      - key: CODEMAP_GITHUB_CLIENT_SECRET
+        sync: false   # only if offering GitHub sign-in
+      - key: CODEMAP_SECRET_KEY
+        sync: false   # only if offering GitHub sign-in - generate with:
+                       # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: CODEMAP_COOKIE_SECURE
+        value: "true" # required once frontend/backend are on different domains (the normal case here)

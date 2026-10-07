@@ -5,6 +5,10 @@ import axios from "axios";
 // (see the README's deployment section).
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api",
+  // Required for the session cookie (set by /auth/github/callback) to be
+  // sent on every request - without this, a signed-in user's GitHub token
+  // never actually gets used for /analyze.
+  withCredentials: true,
 });
 
 /**

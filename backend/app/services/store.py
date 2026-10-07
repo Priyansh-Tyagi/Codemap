@@ -67,12 +67,21 @@ CREATE TABLE IF NOT EXISTS projects (
     cycle_info_json TEXT NOT NULL DEFAULT '{}',
     source_type TEXT NOT NULL,
     source_label TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    is_private INTEGER NOT NULL DEFAULT 0,
+    owner_session_id TEXT
 );
 CREATE TABLE IF NOT EXISTS github_cache (
     cache_key TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     cached_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    github_login TEXT NOT NULL,
+    github_avatar_url TEXT,
+    encrypted_token TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -97,6 +106,8 @@ class ProjectRecord:
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    is_private: bool = False
+    owner_session_id: str | None = None  # set only when is_private - see get_project_for_session
 
 
 # Tracks which DB path has had CREATE TABLE run against it in this process.
@@ -133,6 +144,8 @@ def create_project(
     build_result: BuildResult,
     source_type: str = "local",
     source_label: str | None = None,
+    is_private: bool = False,
+    owner_session_id: str | None = None,
 ) -> ProjectRecord:
     """Runs the shared analysis once, then persists everything under a new id."""
     graph = build_result.graph
@@ -154,6 +167,8 @@ def create_project(
         cycle_components=analysis["cycle_components"],
         source_type=source_type,
         source_label=source_label or build_result.root,
+        is_private=is_private,
+        owner_session_id=owner_session_id if is_private else None,
     )
 
     with closing(_connect()) as conn:
@@ -162,8 +177,9 @@ def create_project(
                 "INSERT INTO projects (project_id, root, graph_json, cycles_json,"
                 " nodes_in_cycles_json, metrics_json, external_dependencies_json,"
                 " unresolved_imports_json, parse_errors_json, architecture_json,"
-                " risk_json, cycle_info_json, source_type, source_label, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " risk_json, cycle_info_json, source_type, source_label, created_at,"
+                " is_private, owner_session_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     record.project_id,
                     record.root,
@@ -183,6 +199,8 @@ def create_project(
                     record.source_type,
                     record.source_label,
                     record.created_at,
+                    int(record.is_private),
+                    record.owner_session_id,
                 ),
             )
     return record
@@ -194,7 +212,8 @@ def get_project(project_id: str) -> ProjectRecord | None:
             "SELECT project_id, root, graph_json, cycles_json, nodes_in_cycles_json,"
             " metrics_json, external_dependencies_json, unresolved_imports_json,"
             " parse_errors_json, architecture_json, risk_json, cycle_info_json,"
-            " source_type, source_label, created_at FROM projects WHERE project_id = ?",
+            " source_type, source_label, created_at, is_private, owner_session_id"
+            " FROM projects WHERE project_id = ?",
             (project_id,),
         ).fetchone()
     if row is None:
@@ -217,6 +236,8 @@ def get_project(project_id: str) -> ProjectRecord | None:
         source_type=row[12],
         source_label=row[13],
         created_at=row[14],
+        is_private=bool(row[15]),
+        owner_session_id=row[16],
     )
 
 
@@ -258,3 +279,77 @@ def clear_all() -> None:
         with conn:
             conn.execute("DELETE FROM projects")
             conn.execute("DELETE FROM github_cache")
+            conn.execute("DELETE FROM sessions")
+
+
+# ---------------------------------------------------------------------------
+# Sessions (GitHub OAuth)
+# ---------------------------------------------------------------------------
+# A session row maps an opaque, unguessable session_id (the only thing that
+# ever leaves the server, as an HttpOnly cookie) to an encrypted GitHub
+# access token plus the little bit of profile info the UI shows. No
+# expires_at column: sessions last until logout or the user clears cookies.
+# A short-lived, auto-expiring session was considered and rejected - this is
+# a portfolio tool a recruiter might revisit after the tab's been closed
+# for a day, and "silently logged out" is a worse experience than "still
+# signed in" for that use case. Revocation (logout) is still immediate.
+
+
+@dataclass
+class SessionRecord:
+    session_id: str
+    github_login: str
+    github_avatar_url: str | None
+    access_token: str  # decrypted
+    created_at: str
+
+
+def create_session(session_id: str, github_login: str, github_avatar_url: str | None, access_token: str) -> None:
+    from services.crypto import encrypt_token
+
+    with closing(_connect()) as conn:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions"
+                " (session_id, github_login, github_avatar_url, encrypted_token, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (
+                    session_id, github_login, github_avatar_url,
+                    encrypt_token(access_token),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+
+def get_session(session_id: str | None) -> SessionRecord | None:
+    """None for a missing session_id, an unknown session, or one whose token
+    can no longer be decrypted (e.g. CODEMAP_SECRET_KEY changed or was never
+    set and the process restarted) - all three mean "not signed in", not a
+    server error."""
+    if not session_id:
+        return None
+    from services.crypto import decrypt_token
+
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT session_id, github_login, github_avatar_url, encrypted_token, created_at"
+            " FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    token = decrypt_token(row[3])
+    if token is None:
+        return None
+    return SessionRecord(
+        session_id=row[0], github_login=row[1], github_avatar_url=row[2],
+        access_token=token, created_at=row[4],
+    )
+
+
+def delete_session(session_id: str | None) -> None:
+    if not session_id:
+        return
+    with closing(_connect()) as conn:
+        with conn:
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))

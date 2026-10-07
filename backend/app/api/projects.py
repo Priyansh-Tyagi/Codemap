@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from graph.builder import build_dependency_graph
 from analyzer.github_fetcher import fetch_github_repo, parse_github_url, GitHubFetchError
+from api.auth import get_access_token_for_request, get_session_id
 from models.schemas import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -55,21 +56,35 @@ def _record_to_analyze_response(record, cached: bool) -> AnalyzeResponse:
         externalDependencyCount=len(record.external_dependencies),
         unresolvedImportCount=len(record.unresolved_imports),
         cached=cached,
+        isPrivate=record.is_private,
     )
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)
-def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
+def analyze_repository(request: AnalyzeRequest, http_request: Request) -> AnalyzeResponse:
+    access_token = get_access_token_for_request(http_request)
+    session_id = get_session_id(http_request)
+
     # GitHub sources only: check the cache BEFORE fetching anything. Cache
     # key comes from parsing the URL locally (no network call), so a cache
     # hit costs nothing - not even the metadata lookup that would otherwise
     # count against the GitHub rate limit.
+    #
+    # Cache key is scoped to the signed-in session when there is one. We
+    # can't know a repo is private until AFTER fetching its metadata (that's
+    # the whole reason the cache check happens first), so instead of trying
+    # to special-case private repos here, EVERY signed-in user's cache is
+    # private to them. The cost is a few avoidable re-fetches when two
+    # signed-in users both analyze the same public repo; the alternative -
+    # one user's session accidentally serving another user's cached private
+    # analysis - is a real leak, not a missed optimization.
     if request.githubUrl:
         try:
             owner, repo, ref = parse_github_url(request.githubUrl)
         except GitHubFetchError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        cache_key = f"{owner}/{repo}@{ref or 'default'}"
+        base_key = f"{owner}/{repo}@{ref or 'default'}"
+        cache_key = f"{session_id}:{base_key}" if session_id else base_key
 
         if not request.forceRefresh:
             cached_project_id = store.get_cached_github_project_id(cache_key)
@@ -82,7 +97,7 @@ def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
 
     if request.githubUrl:
         try:
-            fetched = fetch_github_repo(request.githubUrl)
+            fetched = fetch_github_repo(request.githubUrl, access_token=access_token)
         except GitHubFetchError as e:
             raise HTTPException(status_code=400, detail=str(e))
         target_path = fetched.local_path
@@ -101,7 +116,18 @@ def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
         except NotADirectoryError:
             raise HTTPException(status_code=400, detail=f"path is not a directory: {target_path}")
 
-        record = store.create_project(build_result, source_type=source_type, source_label=source_label)
+        is_private = bool(fetched and fetched.is_private)
+        if is_private and not session_id:
+            # Shouldn't be reachable (a private repo 404s for an anonymous
+            # token-less request before we get here), but if GitHub's API
+            # ever behaves differently, fail safe rather than store a
+            # private repo's graph with no owner to restrict it to.
+            raise HTTPException(status_code=400, detail="Sign in with GitHub to analyze a private repository.")
+
+        record = store.create_project(
+            build_result, source_type=source_type, source_label=source_label,
+            is_private=is_private, owner_session_id=session_id if is_private else None,
+        )
 
         if request.githubUrl:
             store.set_github_cache(cache_key, record.project_id)
@@ -115,16 +141,26 @@ def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
             fetched.cleanup()
 
 
-def _get_record_or_404(project_id: str):
+def _get_record_or_404(project_id: str, http_request: Request):
+    """
+    The single chokepoint every project-read route goes through (here, and
+    imported into graph.py / files.py), so private-project access control
+    lives in exactly one place. A private project is invisible to anyone
+    but the session that created it - returning 404 rather than 403, so a
+    shared link to someone else's private analysis looks identical to a
+    stale/wrong link, not "something exists here you can't see."
+    """
     record = store.get_project(project_id)
     if record is None:
+        raise HTTPException(status_code=404, detail=f"unknown project_id: {project_id}")
+    if record.is_private and record.owner_session_id != get_session_id(http_request):
         raise HTTPException(status_code=404, detail=f"unknown project_id: {project_id}")
     return record
 
 
 @router.get("/projects/{project_id}", response_model=ProjectSummary)
-def get_project_summary(project_id: str) -> ProjectSummary:
-    record = _get_record_or_404(project_id)
+def get_project_summary(project_id: str, http_request: Request) -> ProjectSummary:
+    record = _get_record_or_404(project_id, http_request)
     high_risk_count = sum(
         1
         for node_risk in record.risk.values()
@@ -143,12 +179,13 @@ def get_project_summary(project_id: str) -> ProjectSummary:
         highRiskCount=high_risk_count,
         avgDependencies=record.metrics["avgDependencies"],
         createdAt=record.created_at,
+        isPrivate=record.is_private,
     )
 
 
 @router.get("/projects/{project_id}/graph", response_model=GraphResponse)
-def get_project_graph(project_id: str) -> GraphResponse:
-    record = _get_record_or_404(project_id)
+def get_project_graph(project_id: str, http_request: Request) -> GraphResponse:
+    record = _get_record_or_404(project_id, http_request)
     nodes = [_node_to_out(record, n) for n in record.graph.nodes]
     edges = [
         EdgeOut(source=u, target=v, type=data.get("type", "import"), symbols=data.get("symbols", []))
@@ -158,8 +195,8 @@ def get_project_graph(project_id: str) -> GraphResponse:
 
 
 @router.get("/projects/{project_id}/files", response_model=list[FileListItem])
-def list_project_files(project_id: str) -> list[FileListItem]:
-    record = _get_record_or_404(project_id)
+def list_project_files(project_id: str, http_request: Request) -> list[FileListItem]:
+    record = _get_record_or_404(project_id, http_request)
     return [
         FileListItem(
             id=n,

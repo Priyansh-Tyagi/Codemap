@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from models.schemas import CycleOut, MetricsResponse
 from api.projects import _get_record_or_404
@@ -9,14 +9,14 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["graph"])
 
 
 @router.get("/cycles", response_model=list[CycleOut])
-def get_project_cycles(project_id: str) -> list[CycleOut]:
-    record = _get_record_or_404(project_id)
+def get_project_cycles(project_id: str, http_request: Request) -> list[CycleOut]:
+    record = _get_record_or_404(project_id, http_request)
     return [CycleOut(**c) for c in record.cycles]
 
 
 @router.get("/metrics", response_model=MetricsResponse)
-def get_project_metrics(project_id: str) -> MetricsResponse:
-    record = _get_record_or_404(project_id)
+def get_project_metrics(project_id: str, http_request: Request) -> MetricsResponse:
+    record = _get_record_or_404(project_id, http_request)
     m = record.metrics
     return MetricsResponse(
         fileCount=m["fileCount"],

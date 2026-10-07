@@ -52,6 +52,7 @@ class FetchedRepo:
     owner: str
     repo: str
     ref: str
+    is_private: bool = False
 
     def cleanup(self) -> None:
         """local_path is nested one level inside its own temp dir; remove the whole thing."""
@@ -73,32 +74,46 @@ def parse_github_url(url: str) -> tuple[str, str, str | None]:
     return match.group("owner"), match.group("repo"), match.group("ref")
 
 
-def _github_headers() -> dict:
+def _github_headers(access_token: str | None = None) -> dict:
     """
     Unauthenticated GitHub API requests are capped at 60/hour PER IP - easy
     to exhaust, especially from a shared or cloud IP (confirmed by hitting
-    this exact limit while building this feature). Setting a GITHUB_TOKEN
-    env var (a plain personal access token, no special scopes needed for
-    public repos) raises that to 5,000/hour. Optional - falls back to
-    unauthenticated if unset.
+    this exact limit while building this feature).
+
+    Three ways to raise that, checked in order: (1) a signed-in user's own
+    OAuth token (access_token param - each user then has their own 5,000/hr
+    limit, AND can access their own private repos, which is the actual
+    point of Phase F), (2) a server-wide GITHUB_TOKEN env var (raises the
+    server's shared limit for anonymous use, unchanged from before OAuth
+    existed), (3) unauthenticated.
     """
-    token = os.environ.get("GITHUB_TOKEN")
+    token = access_token or os.environ.get("GITHUB_TOKEN")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def _get_repo_metadata(owner: str, repo: str) -> dict:
+def _get_repo_metadata(owner: str, repo: str, access_token: str | None = None) -> dict:
     resp = requests.get(
         f"{GITHUB_API}/repos/{owner}/{repo}",
-        headers=_github_headers(),
+        headers=_github_headers(access_token),
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if resp.status_code == 404:
-        raise GitHubFetchError(f"Repository not found (or private): {owner}/{repo}")
+        if access_token:
+            raise GitHubFetchError(
+                f"Repository not found: {owner}/{repo} (or your signed-in GitHub "
+                f"account doesn't have access to it)"
+            )
+        raise GitHubFetchError(
+            f"Repository not found (or private - sign in with GitHub to analyze "
+            f"your own private repos): {owner}/{repo}"
+        )
     if resp.status_code == 403 and resp.headers.get("x-ratelimit-remaining") == "0":
         raise GitHubFetchError(
-            "GitHub API rate limit reached for unauthenticated requests (60/hour "
-            "per IP). Try again later, or set a GITHUB_TOKEN environment "
-            "variable to raise the limit to 5,000/hour."
+            "GitHub API rate limit reached"
+            + (" for this account" if access_token else " for unauthenticated requests (60/hour per IP)")
+            + ". Try again later"
+            + ("." if access_token else ", sign in with GitHub, or set a GITHUB_TOKEN "
+                                          "environment variable to raise the limit to 5,000/hour.")
         )
     if not resp.ok:
         raise GitHubFetchError(f"GitHub API error ({resp.status_code}) looking up {owner}/{repo}")
@@ -155,10 +170,15 @@ def _safe_extract(tar: tarfile.TarFile, dest: str) -> int:
     return skipped
 
 
-def fetch_github_repo(url: str) -> FetchedRepo:
+def fetch_github_repo(url: str, access_token: str | None = None) -> FetchedRepo:
+    """
+    access_token: a signed-in user's own GitHub OAuth token, if any. Used
+    for every request in this function - repo lookup, tarball download -
+    so private-repo access and the per-user rate limit are the same token.
+    """
     owner, repo, ref = parse_github_url(url)
 
-    metadata = _get_repo_metadata(owner, repo)
+    metadata = _get_repo_metadata(owner, repo, access_token)
     size_kb = metadata.get("size", 0)
     if size_kb > MAX_REPO_SIZE_KB:
         raise GitHubFetchError(
@@ -170,7 +190,7 @@ def fetch_github_repo(url: str) -> FetchedRepo:
 
     tarball_url = f"{GITHUB_API}/repos/{owner}/{repo}/tarball/{resolved_ref}"
     resp = requests.get(
-        tarball_url, headers=_github_headers(), timeout=REQUEST_TIMEOUT_SECONDS, stream=True
+        tarball_url, headers=_github_headers(access_token), timeout=REQUEST_TIMEOUT_SECONDS, stream=True
     )
     if resp.status_code == 404:
         raise GitHubFetchError(f"Branch or ref not found: {resolved_ref}")
@@ -196,7 +216,10 @@ def fetch_github_repo(url: str) -> FetchedRepo:
             raise GitHubFetchError("Unexpected tarball structure from GitHub")
 
         extracted_root = os.path.join(tmp_dir, entries[0])
-        return FetchedRepo(local_path=extracted_root, owner=owner, repo=repo, ref=resolved_ref)
+        return FetchedRepo(
+            local_path=extracted_root, owner=owner, repo=repo, ref=resolved_ref,
+            is_private=bool(metadata.get("private")),
+        )
     except (tarfile.TarError, OSError) as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise GitHubFetchError(f"Could not unpack {owner}/{repo}: {exc}") from exc

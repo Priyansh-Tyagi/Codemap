@@ -32,6 +32,7 @@ analysis, not guesswork.
 - **Filter and focus** — narrow the graph and file tree by architecture category, minimum risk level, or folder (including subtree scoping); filtered-out nodes are removed from layout entirely rather than just dimmed, so a large repo actually declutters instead of just fading.
 - **GitHub Actions CI check** — the same analysis engine, wrapped as a CLI and a composite GitHub Action (`action.yml`), that gates a pull request on newly-introduced circular dependencies or files crossing a risk threshold, posting the result as a PR comment. See "CI/CD integration" below.
 - **Local or GitHub URL input** — analyze a directory on your own machine, or paste a public GitHub repo URL (`https://github.com/owner/repo`, optionally `/tree/branch`) and CodeMap downloads a one-shot tarball snapshot, analyzes it, and cleans up the temp files automatically. No `git clone`, no commit history fetched.
+- **Sign in with GitHub** — OAuth sign-in gets you your own 5,000/hour GitHub API rate limit (instead of sharing the server's) and the ability to analyze your own private repositories. Entirely optional: every feature above works fully anonymously. See "GitHub sign-in" below.
 - **GitHub result caching** — a repeat analysis of the same repo+ref within 10 minutes is served instantly from memory, skipping both the download and the re-parse entirely (a "Force refresh" checkbox bypasses this when you want fresh data sooner). Local paths are never cached — caching your own actively-edited files would risk silently showing stale results.
 - **AST-based import extraction** — uses Babel (`@babel/parser` + `@babel/traverse`) via a small Node subprocess, so JSX and TypeScript syntax are understood natively rather than approximated with regex.
 - **Local dependency resolution** — resolves relative imports to real files on disk, handling extension guessing and `index` files, with a project-root containment check so a crafted import can't resolve outside the analyzed directory.
@@ -68,6 +69,7 @@ Documented limitations, not oversights:
 | Parsing | JS/TS: Node.js + `@babel/parser`/`@babel/traverse`, invoked as a one-shot subprocess. Python: stdlib `ast` module, called directly (no subprocess). |
 | Graph analysis | NetworkX |
 | Storage | SQLite (stdlib `sqlite3`, no ORM) — persistent, shareable project links |
+| Auth | GitHub OAuth (classic OAuth App, authorization-code flow), opaque session cookie, `cryptography` (Fernet) for tokens at rest |
 
 ## Architecture
 
@@ -153,6 +155,8 @@ https://github.com/owner/repo
 ```
 Note: unauthenticated GitHub API requests are capped at 60/hour per IP —
 see "What CodeMap intentionally does NOT do" below if you hit that limit.
+Signing in with GitHub (optional - see "GitHub sign-in" below) raises this
+to your own 5,000/hour and lets you analyze your own private repos.
 
 ---
 
@@ -282,6 +286,12 @@ FastAPI auto-generates interactive docs once the backend is running:
 | GET | `/api/projects/{id}/files/{path}/impact` | Change-impact analysis |
 | GET | `/api/projects/{id}/cycles` | All detected cycles |
 | GET | `/api/projects/{id}/metrics` | Aggregate project metrics |
+| GET | `/api/auth/github/login` | Redirects to GitHub's OAuth consent screen |
+| GET | `/api/auth/github/callback` | OAuth callback; creates a session, redirects to the frontend |
+| GET | `/api/auth/me` | `{ user: { login, avatarUrl } \| null }` for the current session |
+| POST | `/api/auth/logout` | Clears the current session |
+
+Every `/api/projects/{id}...` route above is also where private-repo access control lives (see "GitHub sign-in" below) — a private project 404s for anyone but the session that created it.
 
 ---
 
@@ -348,6 +358,66 @@ must still resolve as a real module there.
 
 ---
 
+## GitHub sign-in (OAuth)
+
+Sign-in is entirely optional — every feature works fully anonymously, exactly as before this phase. Signing in with GitHub gets you two things:
+
+1. **Your own 5,000/hour GitHub API rate limit**, instead of sharing the server's (or the server's `GITHUB_TOKEN`, if the operator set one).
+2. **Access to your own private repositories.** Analyzing a private repo without being signed in correctly fails with "repository not found" — GitHub's API returns a 404 for a private repo to anyone without access, indistinguishable from it not existing, which is the right behavior (not leaking whether a private repo exists).
+
+### Why a classic OAuth App, not a GitHub App
+
+A GitHub App's fine-grained, per-repository installable permissions are the more "correct" design long-term, but need a separate installation flow (choosing which repos to grant, on top of signing in) and hourly-expiring installation tokens that must be refreshed. A classic OAuth App with the `repo` scope gets the two goals above in a quarter of the code. The honest trade-off: `repo` grants read/write on every repo the signed-in user can access, more than this tool ever uses (it only reads). Stated plainly, not hidden — a real next step if this were a product rather than a portfolio piece.
+
+### Private repos and shareable links: the actual design problem
+
+Every analysis gets a `/p/:id` link viewable by anyone who has it — that's the whole point of Phase E. Combined with private-repo analysis, that's a real privacy leak unless addressed directly: a private repo's file structure, import graph, and risk data would otherwise be visible to anyone with the link, signed in or not.
+
+Fixed by ownership, not obscurity: a project analyzed from a private repo is tagged `is_private` and stamped with the creating session's id. Every project-read route goes through one shared access-control check (`_get_record_or_404` in `api/projects.py`) — a private project is invisible to any session but its owner, returning **404, not 403** (a shared link to someone else's private analysis looks identical to a stale or wrong link; existence itself isn't revealed). One test (`test_private_repo_lockdown_covers_every_read_route...`) exists specifically so that adding a new `/projects/{id}/...` route later and forgetting to route it through that check gets caught immediately rather than silently shipping a leak.
+
+The GitHub result cache is scoped the same way: every signed-in user's cache is private to them (keyed by session id), even for a repo that turns out to be public — simpler than trying to determine privacy before the cache check (which happens *before* any GitHub API call, by design, so privacy isn't knowable yet at that point) and it closes the same class of leak.
+
+### Session model
+
+- The session cookie (`codemap_session`) holds only an opaque, unguessable id — the real GitHub token never reaches the browser.
+- The token is encrypted at rest (`services/crypto.py`, Fernet) via `CODEMAP_SECRET_KEY`. Unset in local dev, a temporary key is generated per-process with a logged warning — every session is invalidated on the next restart, the same class of problem the old CWD-relative DB-path default caused, but this time intentional and loud rather than silent. Set `CODEMAP_SECRET_KEY` for anything that needs sessions to survive a restart:
+  ```
+  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  ```
+- Sessions don't expire on a timer — only on sign-out or clearing cookies. A portfolio tool a recruiter might reopen the next day treating that as "silently signed out" seemed like the worse default; logout is still immediate.
+- CSRF protection on the handshake: `/github/login` sets a short-lived `state` value in both the redirect URL and an HttpOnly cookie; `/github/callback` rejects the request outright if they don't match, before ever calling GitHub's token-exchange endpoint.
+
+### Setting it up (optional, for local dev or deployment)
+
+**Local dev — use a `.env` file, not `set`/`$env:` every session.** `backend/app/.env` is loaded automatically on startup (via `python-dotenv`) and is already in `.gitignore`, so it never gets committed:
+
+```powershell
+cd backend\app
+copy .env.example .env
+notepad .env
+```
+
+Fill in whichever of these you need (everything in `.env.example` is commented with what it's for):
+
+1. Register an OAuth App at <https://github.com/settings/developers> → "New OAuth App". Set its "Authorization callback URL" to `http://localhost:8000/api/auth/github/callback`.
+2. Paste the generated Client ID and Client Secret into `CODEMAP_GITHUB_CLIENT_ID` / `CODEMAP_GITHUB_CLIENT_SECRET` in `.env`.
+3. Generate a `CODEMAP_SECRET_KEY` (command is in `.env.example`) and paste it in too, so signed-in sessions survive a server restart instead of being invalidated every time.
+4. Run `uvicorn main:app --reload --port 8000` as usual — no `set`/`$env:` commands needed, `.env` is picked up automatically.
+
+Leave `.env` absent (or those lines blank) to run CodeMap with sign-in simply not offered — nothing else changes, and this is exactly what every earlier phase of this project already did.
+
+**Deployment** doesn't use `.env` (there's no file to upload on most hosts) — set these as real environment variables in your platform's dashboard instead:
+- `CODEMAP_GITHUB_CLIENT_ID`, `CODEMAP_GITHUB_CLIENT_SECRET` — from the OAuth App (register a second one for production, with its callback URL pointed at your deployed backend).
+- `CODEMAP_FRONTEND_URL` — your deployed frontend's URL.
+- `CODEMAP_SECRET_KEY` — required in practice for deployment (an ephemeral key means every restart signs everyone out).
+- `CODEMAP_COOKIE_SECURE=true` — **required once the frontend and backend are on different domains** (the normal case: a Vercel frontend + a Render backend). Browsers refuse cross-site cookies without `SameSite=None; Secure`, which needs HTTPS on both sides. Not needed for local dev — `localhost:5173` and `localhost:8000` count as the same "site" despite the different ports, so `SameSite=Lax` already works there.
+
+### What's verified, and what isn't
+
+Every piece of the OAuth code that doesn't require a real GitHub account is tested and passing: the state-cookie CSRF check, token exchange and session creation (GitHub's endpoints mocked), session lookup/expiry-of-key-rotation handling, token-at-rest encryption, and - most importantly - the full private-repo access-control suite (every read route, every combination of owner/other-user/anonymous). Live in a real browser, I confirmed the "Sign in with GitHub" button does a real round trip to `github.com`'s actual OAuth endpoint with the correct `client_id`/`redirect_uri`/`scope`/`state` intact. **Completing an actual sign-in requires a real registered OAuth App and a real GitHub account to log into, neither of which exists in this sandbox** - so the callback's happy path (token exchange → session → redirect) is verified by mocked tests, not a live end-to-end login. Worth doing yourself once you have real credentials, before relying on this in an interview demo.
+
+---
+
 ## Scaling behavior (found by analyzing real repos)
 
 Running CodeMap against real projects (Express, 141 files; Flask, 83 files) found two problems the small demo repos could never show:
@@ -367,7 +437,7 @@ of spawning fresh each time — not yet done.
 
 ## Testing
 
-Backend: 167 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 183 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,
@@ -388,14 +458,17 @@ stability when truncated), the default DB path being independent of the
 process's launch directory, GitHub tarball extraction (unwritable files
 skipped and counted rather than crashing the whole analysis, path-traversal
 still rejected, unexpected errors always return JSON), and a Python import
-resolver fix (see "Fixes from testing real repos" below).
+resolver fix (see "Fixes from testing real repos" below), and GitHub OAuth
+(state-cookie CSRF protection, token exchange and session creation with
+GitHub's endpoints mocked, token-at-rest encryption, and private-repo
+access control across every project-read route).
 
 ```powershell
 cd backend
 python -m pytest tests\ -v
 ```
 
-Frontend: 40 `vitest` tests (jsdom + Testing Library) covering the filter
+Frontend: 48 `vitest` tests (jsdom + Testing Library) covering the filter
 predicates, the dagre layout (isolated-file grid, no overlaps, feedback
 edges), the HomePage analyze-then-navigate flow, the ProjectPage
 fetch-by-URL / not-found / backend-down / copy-link (including clipboard
@@ -426,7 +499,9 @@ Set the start command to `uvicorn main:app --host 0.0.0.0 --port $PORT`
 from `backend/app/`, and set these environment variables:
 - `CODEMAP_DB_PATH` — a path on the persistent disk, e.g. `/var/data/codemap.db`
 - `CODEMAP_ALLOWED_ORIGINS` — your deployed frontend's URL (comma-separated if more than one)
-- `GITHUB_TOKEN` — strongly recommended for a public deployment; without it, GitHub's 60-requests/hour limit is shared across *every visitor* hitting your deployed backend from the same server IP, and will get exhausted fast. A token (no special scopes needed for public repos) raises that to 5,000/hour.
+- `GITHUB_TOKEN` — recommended for a public deployment for *anonymous* visitors; without it, GitHub's 60-requests/hour limit is shared across every unauthenticated visitor hitting your deployed backend from the same server IP. A token (no special scopes needed for public repos) raises that to 5,000/hour. Signed-in visitors use their own token instead (see "GitHub sign-in" above) and aren't affected by this either way.
+- `CODEMAP_GITHUB_CLIENT_ID`, `CODEMAP_GITHUB_CLIENT_SECRET`, `CODEMAP_SECRET_KEY`, `CODEMAP_COOKIE_SECURE=true` — only if offering GitHub sign-in; see "GitHub sign-in" above for what each does. `CODEMAP_COOKIE_SECURE=true` specifically is required once frontend and backend are on different domains (the normal case for Vercel + Render), or the session cookie silently never gets sent.
+- `CODEMAP_FRONTEND_URL` — your deployed frontend's URL, so the OAuth callback redirects somewhere real instead of `localhost:5173`.
 
 Make sure Node.js is available in the build environment and that
 `backend/parser`'s `npm install` runs as part of your build step.

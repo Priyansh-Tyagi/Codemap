@@ -114,7 +114,7 @@ def test_analyze_via_github_url_wires_through_correctly(client, cyclic_repo, mon
     )
 
     monkeypatch.setattr(
-        projects_module, "fetch_github_repo", lambda url: fake_repo
+        projects_module, "fetch_github_repo", lambda url, access_token=None: fake_repo
     )
 
     response = client.post(
@@ -142,7 +142,7 @@ def test_repeat_github_analyze_is_served_from_cache(client, cyclic_repo, monkeyp
         def cleanup(self):
             pass
 
-    def fake_fetch(url):
+    def fake_fetch(url, access_token=None):
         fetch_call_count[0] += 1
         return FakeFetchedRepo(local_path=str(cyclic_repo), owner="someone", repo="app", ref="main")
 
@@ -170,7 +170,7 @@ def test_force_refresh_bypasses_the_cache(client, cyclic_repo, monkeypatch):
         def cleanup(self):
             pass
 
-    def fake_fetch(url):
+    def fake_fetch(url, access_token=None):
         fetch_call_count[0] += 1
         return FakeFetchedRepo(local_path=str(cyclic_repo), owner="someone", repo="app", ref="main")
 
@@ -223,7 +223,7 @@ def test_different_refs_get_separate_cache_entries(client, cyclic_repo, monkeypa
         def cleanup(self):
             pass
 
-    def fake_fetch(url):
+    def fake_fetch(url, access_token=None):
         fetch_call_count[0] += 1
         ref = "develop" if "develop" in url else "main"
         return FakeFetchedRepo(local_path=str(cyclic_repo), owner="someone", repo="app", ref=ref)
@@ -247,7 +247,7 @@ def test_cache_expires_after_ttl(client, cyclic_repo, monkeypatch):
         def cleanup(self):
             pass
 
-    def fake_fetch(url):
+    def fake_fetch(url, access_token=None):
         fetch_call_count[0] += 1
         return FakeFetchedRepo(local_path=str(cyclic_repo), owner="someone", repo="app", ref="main")
 

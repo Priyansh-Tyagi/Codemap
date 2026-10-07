@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
-from fastapi import FastAPI
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from api import projects, files, graph
+from api import projects, files, graph, auth
+
+# Loads backend/app/.env if it exists (copy .env.example to .env and fill it
+# in - see README "GitHub sign-in"). Anchored to this file's own directory,
+# not the process's working directory, for the same reason the default
+# SQLite path is (see services/store.py) - so it's found the same way
+# regardless of which directory you happen to launch uvicorn from.
+# override=False: real environment variables you already set always win
+# over .env, which is the behavior you want when e.g. a deployment platform
+# injects CODEMAP_DB_PATH itself.
+load_dotenv(Path(__file__).parent / ".env", override=False)
 
 logger = logging.getLogger("codemap")
 app = FastAPI(
@@ -26,8 +39,14 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Required for the session cookie to be sent on cross-origin requests
+    # (the frontend dev server and the API are different origins even when
+    # both are localhost). allow_origins can't be "*" when this is True -
+    # it isn't, it's always an explicit list, so this is safe as-is.
+    allow_credentials=True,
 )
 
+app.include_router(auth.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
 app.include_router(graph.router, prefix="/api")
@@ -36,10 +55,6 @@ app.include_router(graph.router, prefix="/api")
 @app.get("/api/health")
 def health_check() -> dict:
     return {"status": "ok"}
-
-
-from fastapi import Request
-from fastapi.responses import JSONResponse
 
 
 @app.exception_handler(Exception)
