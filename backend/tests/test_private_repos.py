@@ -116,6 +116,7 @@ def test_private_project_lockdown_covers_every_read_route_not_just_the_summary(r
         f"/api/projects/{pid}/files",
         f"/api/projects/{pid}/cycles",
         f"/api/projects/{pid}/metrics",
+        f"/api/projects/{pid}/tour",
         f"/api/projects/{pid}/files/src/a.js",
         f"/api/projects/{pid}/files/src/a.js/impact",
     ):
@@ -130,6 +131,7 @@ def test_private_project_lockdown_covers_every_read_route_not_just_the_summary(r
         f"/api/projects/{pid}/files",
         f"/api/projects/{pid}/cycles",
         f"/api/projects/{pid}/metrics",
+        f"/api/projects/{pid}/tour",
     ):
         assert client.get(path, cookies={"codemap_session": owner_session}).status_code == 200, path
 

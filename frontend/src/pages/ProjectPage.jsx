@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import Wordmark from "../components/Wordmark";
 import AuthStatus from "../components/AuthStatus";
+import GuidedTour from "../components/GuidedTour";
 import GraphView from "../components/GraphView";
 import DetailsPanel from "../components/DetailsPanel";
 import ImportsPanel from "../components/ImportsPanel";
@@ -26,6 +27,7 @@ export default function ProjectPage() {
   const [filters, setFilters] = useState(emptyFilters());
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  const [tourOpen, setTourOpen] = useState(false);
   const graphRef = useRef(null);
 
   // The URL is the single source of truth: this runs identically whether the
@@ -127,6 +129,15 @@ export default function ProjectPage() {
         {status === "ready" && (
           <button
             type="button"
+            onClick={() => setTourOpen((v) => !v)}
+            className="border border-ink-600 hover:border-brass-500 text-parchment-200 text-[12px] font-mono px-3 py-1 rounded-sm transition-colors"
+          >
+            {tourOpen ? "Close tour" : "Guided tour"}
+          </button>
+        )}
+        {status === "ready" && (
+          <button
+            type="button"
             onClick={copyLink}
             className="border border-ink-600 hover:border-brass-500 text-parchment-200 text-[12px] font-mono px-3 py-1 rounded-sm transition-colors"
           >
@@ -143,7 +154,7 @@ export default function ProjectPage() {
         </Link>
       </header>
 
-      <main className="flex-1 flex overflow-hidden">
+      <main className="flex-1 flex overflow-hidden relative">
         {status === "loading" && (
           <CenterMessage>Loading project…</CenterMessage>
         )}
@@ -204,6 +215,14 @@ export default function ProjectPage() {
               <ImportsPanel node={selectedNode} edges={graph.edges} />
               <ImpactPanel projectId={projectId} filePath={selectedNodeId} onSelectFile={selectFile} />
             </aside>
+
+            {tourOpen && (
+              <GuidedTour
+                projectId={projectId}
+                onSelectFile={selectFile}
+                onClose={() => setTourOpen(false)}
+              />
+            )}
           </>
         )}
       </main>

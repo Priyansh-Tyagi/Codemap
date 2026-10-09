@@ -42,6 +42,7 @@ analysis, not guesswork.
 - **Deterministic risk scoring** — a transparent 0–100 score per file (dependents + centrality + complexity + cycle membership), with human-readable reasons, not a black box.
 - **Architecture classification** — heuristic path-based categorization (Component, Service, Controller, Model, Util, Hook, Route, etc. for JS; plus Django/Flask-flavored categories for Python — Serializer, Migration, Command, Admin — including filename-exact rules like `views.py`/`models.py`/`urls.py` so Django's common flat per-app layout, with no subfolders at all, is still classified correctly).
 - **File tree + search** — browse by folder, or search to jump straight to a file and focus the graph on it.
+- **Guided tour** — a suggested reading order through the codebase, top-down from the entry points (`main → App → Dashboard → components`) or bottom-up from the core, computed entirely from graph structure with zero AI. An optional "Narrate with AI" button adds a one-sentence explanation per stop; if that fails or isn't configured, the tour still works exactly as before. See "Guided tour" below.
 
 ## What CodeMap intentionally does NOT do
 
@@ -286,6 +287,8 @@ FastAPI auto-generates interactive docs once the backend is running:
 | GET | `/api/projects/{id}/files/{path}/impact` | Change-impact analysis |
 | GET | `/api/projects/{id}/cycles` | All detected cycles |
 | GET | `/api/projects/{id}/metrics` | Aggregate project metrics |
+| GET | `/api/projects/{id}/tour?mode=trace\|foundation` | Deterministic guided tour (no AI) |
+| POST | `/api/projects/{id}/tour/narrate?mode=...` | Opt-in AI narration of the tour, cached per project and mode |
 | GET | `/api/auth/github/login` | Redirects to GitHub's OAuth consent screen |
 | GET | `/api/auth/github/callback` | OAuth callback; creates a session, redirects to the frontend |
 | GET | `/api/auth/me` | `{ user: { login, avatarUrl } \| null }` for the current session |
@@ -302,6 +305,7 @@ Every analysis is saved to a SQLite file and gets a permanent URL, `/p/<projectI
 - **Where the file lives:** `CODEMAP_DB_PATH` if set; otherwise `backend/app/codemap.db`, anchored to that directory regardless of where you launch `uvicorn` from. (Earlier this defaulted to `./codemap.db` relative to the process's working directory - starting the server from a slightly different directory between sessions, e.g. a new terminal or an IDE run config, silently created a second, empty database, which looked exactly like "persistence doesn't work." Fixed; see `backend/tests/test_db_path_default.py`.) Tables are created lazily on first use, never at import time. You do not need to set `CODEMAP_DB_PATH` yourself for local development - it's only there for deployment, where you point it at a persistent disk (see below).
 - **Why SQLite, not Postgres:** one process, almost no concurrent writes, and each project is one row of JSON. The tool that fits is the simpler one.
 - **What is (and isn't) cached:** GitHub analyses are cached for 10 minutes per repo+ref (persisted, so the cache also survives restarts). Local paths are never cached — caching a folder you're actively editing would silently show stale results.
+- **Schema changes migrate existing databases.** `CREATE TABLE IF NOT EXISTS` never alters a table that already exists, so columns added in later phases (`is_private`, `owner_session_id`, `cycle_info_json`) are added with `ALTER TABLE` on startup if missing (`_migrate` in `services/store.py`). Without this, an older `codemap.db` failed every analysis with `table projects has no column named is_private` - found when it hit a real pre-existing database, and invisible to the test suite because every other test starts from an empty one. `tests/test_db_migration.py` starts from a genuine old-format database instead, and was verified to fail with the migration disabled. Existing projects and shared links are preserved. Adding a column in future means updating both `_SCHEMA` and `_PROJECT_COLUMN_MIGRATIONS`.
 - **Proof it persists:** `backend/tests/test_persistence.py` runs real separate Python processes that share only the DB file, and importing the store is tested to not create a database file as a side effect.
 
 ### Deployment caveat: ephemeral disks
@@ -418,6 +422,47 @@ Every piece of the OAuth code that doesn't require a real GitHub account is test
 
 ---
 
+## Guided tour
+
+Two layers, deliberately built and shipped in this order:
+
+### 1. The deterministic tour (zero AI, always available)
+
+`GET /api/projects/{id}/tour?mode=trace|foundation` returns up to 12 stops. There are two directions, because people learn a codebase two ways:
+
+- **Top-down (`trace`, the default).** Start at the entry points - files nothing else imports, like `main.jsx` - and walk down what they import, breadth-first: `main → App → Dashboard → its components`. On a small app this *is* the whole story.
+- **Core first (`foundation`).** The most relied-upon files first, ordered utilities-before-what-uses-them. Better on a library with a shared core (Flask: `app.py`, `ctx.py`, `wrappers.py`).
+
+Stages are named by **role**, not depth: *Entry points*, *Orchestrators* (import more files than import them), *Core logic*, *Building blocks* (leaves). Sibling leaf files collapse into one stop ("8 files used by Dashboard.jsx"), and every stop carries its reasons ("Imported by App.jsx", "Imports 8 files - it wires them together").
+
+Every one of these rules exists because of a failure found by running the tour on a real repo, each with a regression test in `backend/tests/test_tour.py`:
+
+| Found on | What went wrong | Fix |
+|---|---|---|
+| Flask | Selecting by dependency depth filled all 12 slots with trivial leaf files; `app.py`, `ctx.py` never appeared | Select by importance first, use depth only to order the result |
+| PitSynapse (a 32-file app) | 9 identical leaf components listed alphabetically; `index.css` in the tour; `Dashboard.jsx` (imports 8 files) buried at stop 10 labelled "Foundation" | Importance counts imports in **both** directions; stages by role; non-code files excluded; sibling leaves grouped; added the top-down mode |
+| Flask, Express | The only files nothing imports were `examples/` apps, so the trace started in demo code | `examples`, `docs`, `fixtures`, `test(s)`, `scripts` directories and `*.config.*` files are excluded |
+| PitSynapse | The Python backend shares no imports with the React frontend (they talk over HTTP) | Files with no import connections can't be placed in a dependency order, so they're left out and the response says how many (`note`) rather than padding the tour |
+
+Limits worth knowing: an import graph can't see HTTP calls between a frontend and backend, so those show up as two disconnected islands; and a repo whose real source lives under a directory named `examples` or `scripts` will have it excluded (falling back to including everything only if nothing else is left).
+
+### 2. AI narration (opt-in, and allowed to fail)
+
+A "✨ Narrate with AI" button (never automatic) calls `POST /tour/narrate`, which asks Gemini for one plain-language sentence per stop and attaches it alongside the deterministic reasons. Four constraints, carried over from this project's GitHub-rate-limit lesson in earlier phases — a free AI key will hit its own wall during exactly the traffic burst that matters most (recruiters evaluating in a cluster) — are all enforced server-side:
+
+- **The deterministic tour never depends on this layer.** `graph/tour.py` has no import of, or dependency on, anything AI-related.
+- **Opt-in only.** Narration is a `POST`, triggered only by the button; it's never called as a side effect of loading the tour or the project page.
+- **Cached per project and direction, forever.** A project's graph is immutable once analyzed, so its narration is fetched from Gemini at most once per project per direction (the two directions produce different stops, so a narration is never attached to the wrong one) (`ai_tour_cache` table) — reopening the tour later serves the cached result instantly, no new API call.
+- **Server-wide rate limit** (20 requests/hour, in-memory — deliberately not persisted, since this is a safety cap on spend, not user data, and should reset on restart) and a strict response-shape check: if Gemini returns a different number of lines than there are stops, the mismatch is rejected rather than risking a sentence attached to the wrong file.
+
+Any failure at any of those points — not configured, rate-limited, a network error, a malformed response — returns the **already-working deterministic tour** plus a short explanation of what didn't work, never a broken page. Verified live: with no `GEMINI_API_KEY` set, clicking the button shows the fallback notice while every stop stays fully visible underneath it.
+
+**Privacy note:** only structural metadata ever leaves the server for narration — file paths, architecture categories, dependency counts, which stage a file falls into. Never file contents. This matters most for a signed-in user's own private repo: CodeMap reads the source to build the graph, but what reaches Gemini is the shape of the graph, not the code in it (`backend/tests/test_ai_tour.py::test_prompt_sends_structure_only_never_file_contents` checks this directly).
+
+**Setup:** set `GEMINI_API_KEY` (in `backend/app/.env`, same as the GitHub OAuth variables — see "GitHub sign-in" above) to a key from [Google AI Studio](https://aistudio.google.com/apikey). The model defaults to `gemini-2.5-flash` and can be changed with `GEMINI_MODEL` — model IDs get retired (this project's first draft hardcoded `gemini-1.5-flash`, which Google's current supported-model list no longer includes, and would have failed outright; caught by checking the docs before shipping). If the configured model is retired, the tour says so and names the variable to change instead of showing a generic error. For any other provider error the tour shows Google's own explanation (e.g. an invalid key, a quota or billing message) alongside a plain-language hint for the status code - an earlier version showed only the bare number (`returned an error (402)`), which left the cause a guess. The API key is redacted from any message shown to the browser. Leave it unset to run CodeMap with narration simply not offered — the deterministic tour is unaffected either way.
+
+---
+
 ## Scaling behavior (found by analyzing real repos)
 
 Running CodeMap against real projects (Express, 141 files; Flask, 83 files) found two problems the small demo repos could never show:
@@ -437,7 +482,7 @@ of spawning fresh each time — not yet done.
 
 ## Testing
 
-Backend: 183 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 229 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,
@@ -461,14 +506,17 @@ still rejected, unexpected errors always return JSON), and a Python import
 resolver fix (see "Fixes from testing real repos" below), and GitHub OAuth
 (state-cookie CSRF protection, token exchange and session creation with
 GitHub's endpoints mocked, token-at-rest encryption, and private-repo
-access control across every project-read route).
+access control across every project-read route), and the guided tour
+(importance-first selection with a regression test built from a real
+failure on the Flask repo, AI-narration caching, rate limiting, and
+graceful degradation for every kind of AI-layer failure).
 
 ```powershell
 cd backend
 python -m pytest tests\ -v
 ```
 
-Frontend: 48 `vitest` tests (jsdom + Testing Library) covering the filter
+Frontend: 61 `vitest` tests (jsdom + Testing Library) covering the filter
 predicates, the dagre layout (isolated-file grid, no overlaps, feedback
 edges), the HomePage analyze-then-navigate flow, the ProjectPage
 fetch-by-URL / not-found / backend-down / copy-link (including clipboard
@@ -502,6 +550,7 @@ from `backend/app/`, and set these environment variables:
 - `GITHUB_TOKEN` — recommended for a public deployment for *anonymous* visitors; without it, GitHub's 60-requests/hour limit is shared across every unauthenticated visitor hitting your deployed backend from the same server IP. A token (no special scopes needed for public repos) raises that to 5,000/hour. Signed-in visitors use their own token instead (see "GitHub sign-in" above) and aren't affected by this either way.
 - `CODEMAP_GITHUB_CLIENT_ID`, `CODEMAP_GITHUB_CLIENT_SECRET`, `CODEMAP_SECRET_KEY`, `CODEMAP_COOKIE_SECURE=true` — only if offering GitHub sign-in; see "GitHub sign-in" above for what each does. `CODEMAP_COOKIE_SECURE=true` specifically is required once frontend and backend are on different domains (the normal case for Vercel + Render), or the session cookie silently never gets sent.
 - `CODEMAP_FRONTEND_URL` — your deployed frontend's URL, so the OAuth callback redirects somewhere real instead of `localhost:5173`.
+- `GEMINI_API_KEY` — only if offering AI tour narration; see "Guided tour" above. Leave unset to offer the tour without narration.
 
 Make sure Node.js is available in the build environment and that
 `backend/parser`'s `npm install` runs as part of your build step.

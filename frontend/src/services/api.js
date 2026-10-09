@@ -54,4 +54,17 @@ export async function getFileImpact(projectId, filePath) {
   return data;
 }
 
+export async function getProjectTour(projectId, mode = "trace") {
+  const { data } = await api.get(`/projects/${projectId}/tour`, { params: { mode } });
+  return data;
+}
+
+/** POST, not GET: narration is an opt-in action that may call a paid/rate-
+ * limited third-party AI provider - it must only happen when the user
+ * explicitly asks for it, never as a side effect of loading a page. */
+export async function narrateProjectTour(projectId, mode = "trace") {
+  const { data } = await api.post(`/projects/${projectId}/tour/narrate`, null, { params: { mode } });
+  return data;
+}
+
 export default api;

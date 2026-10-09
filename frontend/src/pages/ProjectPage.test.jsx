@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 
 vi.mock("../services/api", () => ({
@@ -17,6 +18,13 @@ vi.mock("../components/GraphView", async () => {
   };
 });
 vi.mock("../components/ImpactPanel", () => ({ default: () => null }));
+vi.mock("../components/GuidedTour", () => ({
+  default: ({ onClose }) => (
+    <div data-testid="guided-tour">
+      <button onClick={onClose}>Close guided tour</button>
+    </div>
+  ),
+}));
 vi.mock("../services/auth", () => ({
   getCurrentUser: vi.fn().mockResolvedValue(null),
   logout: vi.fn(),
@@ -147,5 +155,22 @@ describe("ProjectPage", () => {
     renderAt("/p/abc");
     await screen.findByTestId("graph");
     expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  });
+
+  it("the Guided tour button opens and closes the tour panel", async () => {
+    getProjectGraph.mockResolvedValue({ nodes: [node("a.js")], edges: [] });
+    getProjectSummary.mockResolvedValue(summary);
+    const user = userEvent.setup();
+    renderAt("/p/abc");
+
+    const toggle = await screen.findByRole("button", { name: "Guided tour" });
+    expect(screen.queryByTestId("guided-tour")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(screen.getByTestId("guided-tour")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close tour" })).toBeInTheDocument();
+
+    await user.click(screen.getByText("Close guided tour"));
+    expect(screen.queryByTestId("guided-tour")).not.toBeInTheDocument();
   });
 });

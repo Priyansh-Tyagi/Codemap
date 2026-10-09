@@ -117,3 +117,25 @@ class ImpactResponse(BaseModel):
     directDependents: list[str]
     indirectDependents: list[str]
     estimatedAffected: int
+
+
+class TourMemberOut(BaseModel):
+    fileId: str
+    filePath: str
+
+
+class TourStopOut(BaseModel):
+    fileId: str
+    filePath: str  # for a grouped stop this is a label like "8 files used by Dashboard.jsx"
+    stage: str
+    reasons: list[str]
+    members: list[TourMemberOut] = []  # non-empty only for a collapsed group of sibling files
+    narrative: str | None = None  # filled in only by the AI-narrated tour, never the deterministic one
+
+
+class TourResponse(BaseModel):
+    stops: list[TourStopOut]
+    mode: str = "trace"          # "trace" (top-down from entry points) or "foundation" (bottom-up)
+    note: str | None = None      # e.g. how many files had no import connections and were left out
+    narrated: bool = False       # True only when AI narration succeeded for this response
+    narrationError: str | None = None  # set when narration was attempted but unavailable/failed

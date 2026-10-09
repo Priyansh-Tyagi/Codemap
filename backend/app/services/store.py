@@ -83,6 +83,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     encrypted_token TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ai_tour_cache (
+    project_id TEXT PRIMARY KEY,
+    narratives_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -110,6 +115,29 @@ class ProjectRecord:
     owner_session_id: str | None = None  # set only when is_private - see get_project_for_session
 
 
+# Columns added to `projects` after its first release. CREATE TABLE IF NOT
+# EXISTS never alters a table that already exists, so a database file
+# created by an earlier version silently lacked these columns and every
+# INSERT failed with "table projects has no column named is_private" (hit
+# for real on an existing codemap.db the first time Phase F ran against it).
+# Each entry is applied with ALTER TABLE only if the column is missing, so
+# existing saved projects and shared links are preserved. To add a column
+# in future: add it to _SCHEMA for fresh databases AND to this list.
+_PROJECT_COLUMN_MIGRATIONS = [
+    ("cycle_info_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("is_private", "INTEGER NOT NULL DEFAULT 0"),
+    ("owner_session_id", "TEXT"),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+    for column, ddl in _PROJECT_COLUMN_MIGRATIONS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {ddl}")
+    conn.commit()
+
+
 # Tracks which DB path has had CREATE TABLE run against it in this process.
 _initialized_path: str | None = None
 
@@ -126,6 +154,7 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=10)
     if _initialized_path != path:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         conn.commit()
         _initialized_path = path
     return conn
@@ -280,6 +309,7 @@ def clear_all() -> None:
             conn.execute("DELETE FROM projects")
             conn.execute("DELETE FROM github_cache")
             conn.execute("DELETE FROM sessions")
+            conn.execute("DELETE FROM ai_tour_cache")
 
 
 # ---------------------------------------------------------------------------
@@ -353,3 +383,29 @@ def delete_session(session_id: str | None) -> None:
     with closing(_connect()) as conn:
         with conn:
             conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+
+# ---------------------------------------------------------------------------
+# AI tour narration cache
+# ---------------------------------------------------------------------------
+# Keyed by project_id alone, not by the tour content - a stored project's
+# graph is immutable (there's no "re-analyze in place"), so its deterministic
+# tour can never change either. One successful narration per project, ever.
+
+
+def get_cached_tour_narratives(project_id: str) -> list[str] | None:
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT narratives_json FROM ai_tour_cache WHERE project_id = ?", (project_id,)
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def set_cached_tour_narratives(project_id: str, narratives: list[str]) -> None:
+    with closing(_connect()) as conn:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO ai_tour_cache (project_id, narratives_json, created_at)"
+                " VALUES (?,?,?)",
+                (project_id, json.dumps(narratives), datetime.now(timezone.utc).isoformat()),
+            )

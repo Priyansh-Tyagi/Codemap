@@ -32,3 +32,5 @@ services:
                        # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       - key: CODEMAP_COOKIE_SECURE
         value: "true" # required once frontend/backend are on different domains (the normal case here)
+      - key: GEMINI_API_KEY
+        sync: false   # optional - offers AI narration for the guided tour
