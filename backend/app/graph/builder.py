@@ -34,6 +34,7 @@ from analyzer.scanner import scan_repository, PYTHON_EXTENSIONS
 from analyzer.parser_bridge import parse_files
 from analyzer.classifier import classify_imports
 from analyzer.resolver import resolve_specifier
+from analyzer.alias_resolver import AliasResolver, AliasStatus
 from analyzer.python_parser import parse_python_files
 from analyzer.python_resolver import resolve_python_import, ResolutionKind
 
@@ -86,12 +87,28 @@ def _process_js_files(graph, parsed_files, root, external_dependencies, unresolv
         if file_result.get("error"):
             parse_errors.append({"file": node_id, "error": file_result["error"]})
 
+    aliases = AliasResolver(root)  # per-run: config files are never cached across analyses
+
     for file_result in parsed_files:
         source_id = _to_node_id(file_result["filePath"], root)
         local_imports, external_imports = classify_imports(file_result.get("imports", []))
 
         for imp in external_imports:
             spec = imp["specifier"]
+
+            # A non-relative specifier may still be the project's OWN code via a
+            # path alias (tsconfig paths, vite alias, "@/" -> src/). Try that
+            # before declaring it an external package.
+            resolved, status = aliases.resolve(file_result["filePath"], spec)
+            if status == AliasStatus.LOCAL:
+                target_id = _to_node_id(resolved, root)
+                _add_node_if_missing(graph, target_id, "javascript")
+                _add_or_merge_edge(graph, source_id, target_id, imp["type"], imp.get("symbols", []))
+                continue
+            if status == AliasStatus.UNRESOLVED:
+                unresolved_imports.append({"file": source_id, "specifier": spec, "type": imp["type"]})
+                continue
+
             external_dependencies[spec] = external_dependencies.get(spec, 0) + 1
 
         for imp in local_imports:

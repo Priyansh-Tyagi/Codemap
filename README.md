@@ -42,6 +42,7 @@ The interface is neutral and **colour is reserved for data**: the only saturated
 - **GitHub Actions CI check** — the same analysis engine, wrapped as a CLI and a composite GitHub Action (`action.yml`), that gates a pull request on newly-introduced circular dependencies or files crossing a risk threshold, posting the result as a PR comment. See "CI/CD integration" below.
 - **Local or GitHub URL input** — analyze a directory on your own machine, or paste a public GitHub repo URL (`https://github.com/owner/repo`, optionally `/tree/branch`) and CodeMap downloads a one-shot tarball snapshot, analyzes it, and cleans up the temp files automatically. No `git clone`, no commit history fetched.
 - **Sign in with GitHub** — OAuth sign-in gets you your own 5,000/hour GitHub API rate limit (instead of sharing the server's) and the ability to analyze your own private repositories. Entirely optional: every feature above works fully anonymously. See "GitHub sign-in" below.
+- **Path-alias resolution** — `@/lib/utils`-style imports (tsconfig `paths`/`baseUrl`/`extends`, Vite `resolve.alias`, `@/` → `src/`) become real graph edges instead of being miscounted as npm packages. Resolved per package so monorepos work, never cached across runs, and the GitHub extractor keeps the config files so URL analyses get the same result. Measured on real repos: the FastAPI full-stack template went from 162 to 365 edges (0 lost, isolated files 55 → 19); shadcn's Taxonomy went from a completely disconnected graph (0 edges) to 259.
 - **GitHub result caching** — a repeat analysis of the same repo+ref within 10 minutes is served instantly from memory, skipping both the download and the re-parse entirely (a "Force refresh" checkbox bypasses this when you want fresh data sooner). Local paths are never cached — caching your own actively-edited files would risk silently showing stale results.
 - **AST-based import extraction** — uses Babel (`@babel/parser` + `@babel/traverse`) via a small Node subprocess, so JSX and TypeScript syntax are understood natively rather than approximated with regex.
 - **Local dependency resolution** — resolves relative imports to real files on disk, handling extension guessing and `index` files, with a project-root containment check so a crafted import can't resolve outside the analyzed directory.
@@ -57,7 +58,7 @@ The interface is neutral and **colour is reserved for data**: the only saturated
 
 Documented limitations, not oversights:
 
-- No bundler path-alias resolution (webpack `resolve.alias`, tsconfig `paths` like `@/components/Button`) — only relative (`./`, `../`) and absolute (`/`) specifiers resolve to local JS/TS files today.
+- Path aliases are resolved **statically** (config files are read, never executed): tsconfig/jsconfig `paths` + `baseUrl` (with `extends`), `resolve.alias` in `vite.config.*`, and `@/` → nearest `src/`. Not supported: aliases defined in webpack/Babel/Next configs that aren't mirrored in a tsconfig, aliases computed at runtime, `package.json` `exports`/`imports` maps, and `extends` of packages in `node_modules`. An alias to a build-generated folder that isn't in the repo (e.g. contentlayer's `.contentlayer/generated`) is reported as unresolved, which is accurate until you build.
 - Python resolution does not distinguish regular packages (with `__init__.py`) from implicit namespace packages (PEP 420) — any directory is treated as a valid package. Does not support a `src/`-layout Python project where the real package root is nested below the directory you point CodeMap at.
 - No re-export detection for Python (JS's `export { x } from "./y"` has a direct concept; Python's equivalent — importing something into `__init__.py` specifically so other code can import it from the package rather than the submodule — is a convention, not syntax, and isn't specially detected).
 - No support for other non-JS/TS/Python languages.
@@ -493,7 +494,7 @@ of spawning fresh each time — not yet done.
 
 ## Testing
 
-Backend: 251 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 279 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,

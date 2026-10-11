@@ -15,8 +15,10 @@ def is_local_specifier(specifier: str) -> bool:
     rare but valid in some configs). Everything else - bare names like "react",
     "@scope/pkg", "node:fs" - is treated as external.
 
-    Deliberately NOT resolving tsconfig `paths` aliases (e.g. "@/components/Button")
-    in the MVP - documented limitation. They'll be classified as external here.
+    A non-relative specifier is classified external HERE, but the graph builder
+    then asks analyzer/alias_resolver.py whether it is really one of the
+    project's own path aliases ("@/components/Button") before counting it as
+    an npm package.
     """
     specifier = specifier.strip()
     if not specifier:

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import requests
 
 from analyzer.scanner import DEFAULT_IGNORE_DIRS, SUPPORTED_EXTENSIONS
+from analyzer.alias_resolver import ALIAS_CONFIG_FILE_RE
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +123,9 @@ def _get_repo_metadata(owner: str, repo: str, access_token: str | None = None) -
 
 def _wanted_member(member: tarfile.TarInfo) -> bool:
     """
-    Only extract what the scanner would ever read: regular files with a
-    supported source extension that are not inside an ignored directory.
+    Only extract what the scanner (or alias resolution) would ever read: regular
+    files with a supported source extension, plus tsconfig/jsconfig/vite config
+    files, that are not inside an ignored directory.
     Everything else (images, fixtures, node_modules, docs assets) is pure
     cost - and on Windows it is also a liability, because one file whose
     full path exceeds the 260-character MAX_PATH limit used to abort the
@@ -135,7 +137,11 @@ def _wanted_member(member: tarfile.TarInfo) -> bool:
     # parts[0] is GitHub's top-level "owner-repo-<sha>" directory
     if any(part in DEFAULT_IGNORE_DIRS or part.startswith(".") for part in parts[1:-1]):
         return False
-    return os.path.splitext(parts[-1])[1] in SUPPORTED_EXTENSIONS
+    if os.path.splitext(parts[-1])[1] in SUPPORTED_EXTENSIONS:
+        return True
+    # tsconfig/jsconfig/vite.config are not source files, but without them
+    # path aliases like "@/lib/utils" cannot be resolved for GitHub sources.
+    return bool(ALIAS_CONFIG_FILE_RE.match(parts[-1]))
 
 
 def _safe_extract(tar: tarfile.TarFile, dest: str) -> int:
