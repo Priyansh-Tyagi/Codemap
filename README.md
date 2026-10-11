@@ -12,6 +12,15 @@ analysis, not guesswork.
 
 ---
 
+## Design
+
+The interface is neutral and **colour is reserved for data**: the only saturated hues on screen are the architecture categories (each with its own glyph, so it's never colour alone), risk flags, and circular-dependency red. Everything else - panels, buttons, text - is a neutral scale, and the primary action is ink rather than an accent colour that would compete with the data.
+
+- **Two themes, light and dark.** Defaults to your OS setting, with a toggle in the header; the choice is remembered. Both are defined as CSS variables in `frontend/src/index.css` (`:root[data-theme=...]`); components only use semantic names (`bg-surface`, `text-muted`, `border-line`), never raw colours, so a third theme is one more block of variables. The theme is set by a small inline script in `index.html` before first paint, so there's no flash.
+- **Type:** Geist for the interface, Geist Mono only for file paths and code.
+- **Canvas:** dot-grid stage, node cards with a glyph chip, visible ports, floating panels. The home page's hero is the product's own output (a small dependency map, including a circular dependency) that draws itself once on load, and respects `prefers-reduced-motion`.
+- **Layout:** the project view is desktop-first (three panels). The home page is responsive down to phone width; the project view on a phone is not yet optimised.
+
 ## Screenshots
 
 *(Add your own screenshots here once you've run CodeMap locally — see
@@ -65,7 +74,7 @@ Documented limitations, not oversights:
 
 | Layer | Choice |
 |---|---|
-| Frontend | React + Vite + Tailwind CSS v4 + React Flow + dagre + Axios |
+| Frontend | React + Vite + Tailwind CSS v4 + React Flow + dagre + Axios + lucide-react (icons) |
 | Backend | Python + FastAPI |
 | Parsing | JS/TS: Node.js + `@babel/parser`/`@babel/traverse`, invoked as a one-shot subprocess. Python: stdlib `ast` module, called directly (no subprocess). |
 | Graph analysis | NetworkX |
@@ -459,7 +468,9 @@ Any failure at any of those points — not configured, rate-limited, a network e
 
 **Privacy note:** only structural metadata ever leaves the server for narration — file paths, architecture categories, dependency counts, which stage a file falls into. Never file contents. This matters most for a signed-in user's own private repo: CodeMap reads the source to build the graph, but what reaches Gemini is the shape of the graph, not the code in it (`backend/tests/test_ai_tour.py::test_prompt_sends_structure_only_never_file_contents` checks this directly).
 
-**Setup:** set `GEMINI_API_KEY` (in `backend/app/.env`, same as the GitHub OAuth variables — see "GitHub sign-in" above) to a key from [Google AI Studio](https://aistudio.google.com/apikey). The model defaults to `gemini-2.5-flash` and can be changed with `GEMINI_MODEL` — model IDs get retired (this project's first draft hardcoded `gemini-1.5-flash`, which Google's current supported-model list no longer includes, and would have failed outright; caught by checking the docs before shipping). If the configured model is retired, the tour says so and names the variable to change instead of showing a generic error. For any other provider error the tour shows Google's own explanation (e.g. an invalid key, a quota or billing message) alongside a plain-language hint for the status code - an earlier version showed only the bare number (`returned an error (402)`), which left the cause a guess. The API key is redacted from any message shown to the browser. Leave it unset to run CodeMap with narration simply not offered — the deterministic tour is unaffected either way.
+**Setup:** set `GEMINI_API_KEY` (in `backend/app/.env`, same as the GitHub OAuth variables — see "GitHub sign-in" above) to a key from [Google AI Studio](https://aistudio.google.com/apikey). The model is set in one place, `GEMINI_MODEL` in `backend/app/.env` (never edit it in code; the code only holds a fallback default), and defaults to `gemini-2.5-flash` — model IDs get retired (this project's first draft hardcoded `gemini-1.5-flash`, which Google's current supported-model list no longer includes, and would have failed outright; caught by checking the docs before shipping). If the configured model is retired, the tour says so and names the variable to change instead of showing a generic error. For any other provider error the tour shows Google's own explanation (e.g. an invalid key, a quota or billing message) alongside a plain-language hint for the status code - an earlier version showed only the bare number (`returned an error (402)`), which left the cause a guess. The API key is sent in the `x-goog-api-key` header (as Google's docs do), not in the URL, is stripped of pasted whitespace/quotes, and is redacted from any message shown to the browser. When Google rejects a key, the backend console logs its length and first four characters (never the whole key) - keys from AI Studio start with `AIza` or the newer `AQ.`. To test a key outside the app, run `python check_gemini.py` from `backend\app`: it uses your `.env`, the same model and header the app uses, tells you whether the key authenticates and whether the model can generate, and says what the result means (the same 401 is widely reported for some accounts' new `AQ.` keys). A `402` means the Google project's prepaid billing credits are used up - a billing issue on Google's side of the key, not a code or key problem. Leave it unset to run CodeMap with narration simply not offered — the deterministic tour is unaffected either way.
+
+**4. A Python backend showed zero connections.** On a real project (a React frontend plus a FastAPI backend) every Python file looked isolated. The files import each other relative to the folder the app is run from - `from routes.simulation import router` in `backend/main.py` - but the resolver only looked for `routes/` at the repository root, so every such import was classified as an external package. I had also explained the missing edges away as "the backend talks to the frontend over HTTP" without checking; the imports were right there. Absolute imports are now resolved against, in order: the project root, `<root>/src`, then each parent directory of the importing file (how Python itself behaves when a script's folder is on `sys.path`). Standard-library names are never resolved through the parent-directory step, so a local `json/` folder can't capture `import json`. Measured on real repos: PitSynapse 0 → 6 Python edges, the FastAPI full-stack template 0 → 71, Flask 104 → 186 (tests now connect to `src/flask`), with **0 existing edges lost**, and the new edges spot-checked as real. Regression tests: `backend/tests/test_python_import_roots.py`. Still not supported: projects that find their code through `sys.path` edits or `PYTHONPATH` outside the importing file's own ancestors.
 
 ---
 
@@ -482,7 +493,7 @@ of spawning fresh each time — not yet done.
 
 ## Testing
 
-Backend: 229 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 251 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,
@@ -516,7 +527,7 @@ cd backend
 python -m pytest tests\ -v
 ```
 
-Frontend: 61 `vitest` tests (jsdom + Testing Library) covering the filter
+Frontend: 63 `vitest` tests (jsdom + Testing Library) covering the filter
 predicates, the dagre layout (isolated-file grid, no overlaps, feedback
 edges), the HomePage analyze-then-navigate flow, the ProjectPage
 fetch-by-URL / not-found / backend-down / copy-link (including clipboard

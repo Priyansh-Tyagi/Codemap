@@ -39,6 +39,7 @@ describe("HomePage", () => {
     const user = userEvent.setup();
     renderHome();
 
+    await user.click(screen.getByRole("button", { name: "Local path" }));
     await user.type(screen.getByLabelText("Repository source"), "/repo");
     await user.click(screen.getByRole("button", { name: "Analyze" }));
 
@@ -117,5 +118,21 @@ describe("HomePage", () => {
   it("shows the GitHub sign-in control in the header", async () => {
     renderHome();
     expect(await screen.findByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
+  });
+
+  it("defaults to GitHub URL, since a deployed server can't read local folders", () => {
+    renderHome();
+    expect(screen.getByRole("button", { name: "GitHub URL" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Repository source")).toHaveAttribute("placeholder", expect.stringContaining("github.com"));
+  });
+
+  it("an example chip fills in a real repo URL and switches to GitHub mode", async () => {
+    const user = userEvent.setup();
+    renderHome();
+    await user.click(screen.getByRole("button", { name: "Local path" }));
+    await user.click(screen.getByRole("button", { name: "pallets/flask" }));
+
+    expect(screen.getByLabelText("Repository source")).toHaveValue("https://github.com/pallets/flask");
+    expect(screen.getByRole("button", { name: "GitHub URL" })).toHaveAttribute("aria-pressed", "true");
   });
 });

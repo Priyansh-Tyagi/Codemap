@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Compass, Sparkles, X } from "lucide-react";
 import { getProjectTour, narrateProjectTour } from "../services/api";
 import { describeApiError } from "../utils/apiError";
 
@@ -16,10 +17,10 @@ function FileLabel({ path }) {
   const dir = i >= 0 ? clean.slice(0, i) : "";
   return (
     <span className="block min-w-0" title={path}>
-      <span className="block text-[12px] font-mono text-parchment-200 group-hover:text-brass-400 truncate">
+      <span className="block text-[12.5px] font-mono font-medium text-fg group-hover:underline underline-offset-2 truncate">
         {name}
       </span>
-      {dir && <span className="block text-[10px] font-mono text-parchment-700 truncate">{dir}</span>}
+      {dir && <span className="block text-[10.5px] font-mono text-faint truncate">{dir}</span>}
     </span>
   );
 }
@@ -29,6 +30,9 @@ function FileLabel({ path }) {
  *  1. The deterministic tour loads on open with no AI involved.
  *  2. "Narrate with AI" is a separate, explicit opt-in. Its failure only ever
  *     adds an inline notice - the stops already on screen never disappear.
+ *
+ * Stops are numbered and joined by a line because the tour IS a sequence:
+ * the numbering is information (read in this order), not decoration.
  */
 export default function GuidedTour({ projectId, onSelectFile, onClose }) {
   const [mode, setMode] = useState("trace");
@@ -79,33 +83,33 @@ export default function GuidedTour({ projectId, onSelectFile, onClose }) {
     }
   }
 
-  // Group consecutive stops that share a stage, as headings.
+  // Consecutive stops sharing a stage are grouped under one caption; the
+  // running number continues across groups.
   const stages = [];
-  for (const stop of stops) {
-    if (stages.length === 0 || stages[stages.length - 1].name !== stop.stage) {
-      stages.push({ name: stop.stage, stops: [stop] });
-    } else {
-      stages[stages.length - 1].stops.push(stop);
-    }
-  }
+  stops.forEach((stop, index) => {
+    const last = stages[stages.length - 1];
+    if (!last || last.name !== stop.stage) stages.push({ name: stop.stage, items: [{ stop, index }] });
+    else last.items.push({ stop, index });
+  });
 
   return (
-    <div className="absolute inset-y-0 right-0 w-80 bg-ink-900 border-l border-ink-700 flex flex-col z-10">
-      <div className="flex items-center gap-2 px-4 h-14 border-b border-ink-700 flex-shrink-0">
-        <h2 className="font-display text-[14px] font-semibold text-parchment-100">Guided tour</h2>
+    <div className="absolute top-0 bottom-3 right-3 w-[22rem] max-w-[calc(100%-1.5rem)] rounded-2xl bg-surface border border-line shadow-float flex flex-col z-10 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 h-14 border-b border-line flex-shrink-0">
+        <Compass size={16} className="text-muted" aria-hidden="true" />
+        <h2 className="text-[14px] font-semibold text-fg">Guided tour</h2>
         <div className="flex-1" />
         <button
           type="button"
           onClick={onClose}
           aria-label="Close guided tour"
-          className="text-parchment-500 hover:text-parchment-200 text-[13px]"
+          className="grid place-items-center w-7 h-7 rounded-lg text-muted hover:text-fg hover:bg-surface-2"
         >
-          ✕
+          <X size={15} aria-hidden="true" />
         </button>
       </div>
 
       <div className="px-4 pt-3" role="group" aria-label="Tour direction">
-        <div className="inline-flex w-full bg-ink-800 border border-ink-600 rounded-sm p-0.5">
+        <div className="grid grid-cols-2 bg-surface-2 border border-line rounded-lg p-0.5">
           {MODES.map((m) => (
             <button
               key={m.id}
@@ -113,8 +117,8 @@ export default function GuidedTour({ projectId, onSelectFile, onClose }) {
               aria-pressed={mode === m.id}
               title={m.hint}
               onClick={() => setMode(m.id)}
-              className={`flex-1 px-2 py-1 text-[11px] font-mono rounded-sm transition-colors ${
-                mode === m.id ? "bg-brass-500 text-ink-950" : "text-parchment-400 hover:text-parchment-100"
+              className={`px-2 py-1 text-[12px] font-medium rounded-md transition-colors ${
+                mode === m.id ? "bg-surface text-fg shadow-soft" : "text-muted hover:text-fg"
               }`}
             >
               {m.label}
@@ -124,14 +128,12 @@ export default function GuidedTour({ projectId, onSelectFile, onClose }) {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        {status === "loading" && <p className="text-[12px] text-parchment-500">Loading tour…</p>}
+        {status === "loading" && <p className="text-[12.5px] text-muted">Loading tour…</p>}
         {status === "error" && (
-          <p role="alert" className="text-[12px] text-flag-400">{narrationError}</p>
+          <p role="alert" className="text-[12.5px] text-danger">{narrationError}</p>
         )}
         {status === "ready" && stops.length === 0 && (
-          <p className="text-[12px] text-parchment-500 leading-relaxed">
-            {note || "No files to tour in this project."}
-          </p>
+          <p className="text-[12.5px] text-muted leading-relaxed">{note || "No files to tour in this project."}</p>
         )}
         {status === "ready" && stops.length > 0 && (
           <>
@@ -140,63 +142,65 @@ export default function GuidedTour({ projectId, onSelectFile, onClose }) {
                 type="button"
                 onClick={handleNarrate}
                 disabled={narrating}
-                className="mb-3 w-full border border-brass-700 hover:border-brass-500 text-brass-400 text-[12px] font-mono px-3 py-1.5 rounded-sm transition-colors disabled:opacity-40"
+                className="mb-3 w-full inline-flex items-center justify-center gap-1.5 h-9 rounded-lg border border-line-strong text-[12.5px] font-medium text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
               >
-                {narrating ? "Narrating…" : "✨ Narrate with AI"}
+                <Sparkles size={14} aria-hidden="true" />
+                {narrating ? "Narrating…" : "Narrate with AI"}
               </button>
             )}
             {narrationError && (
-              <p role="alert" className="mb-3 text-[11px] text-parchment-500 leading-relaxed">
+              <p role="alert" className="mb-3 rounded-lg bg-surface-2 border border-line px-3 py-2 text-[11.5px] text-muted leading-relaxed">
                 {narrationError} Showing the deterministic tour.
               </p>
             )}
-            {stages.map((stage, si) => (
-              <div key={`${stage.name}-${si}`} className="mb-4">
-                <h3 className="text-[10px] uppercase tracking-wide text-parchment-600 mb-1.5">
-                  {stage.name}
-                </h3>
-                <ol className="space-y-2.5">
-                  {stage.stops.map((stop) => (
-                    <li key={stop.fileId}>
-                      {stop.members?.length > 0 ? (
-                        <div>
-                          <div className="text-[12px] font-mono text-parchment-300">{stop.filePath}</div>
-                          <ul className="mt-1 ml-2 pl-2 border-l border-ink-600 space-y-1">
-                            {stop.members.map((m) => (
-                              <li key={m.fileId}>
-                                <button
-                                  type="button"
-                                  onClick={() => onSelectFile(m.fileId)}
-                                  className="group text-left w-full"
-                                >
-                                  <FileLabel path={m.filePath} />
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => onSelectFile(stop.fileId)}
-                          className="group text-left w-full"
-                        >
-                          <FileLabel path={stop.filePath} />
-                        </button>
-                      )}
-                      {stop.narrative ? (
-                        <p className="text-[11px] text-parchment-400 leading-snug mt-0.5">{stop.narrative}</p>
-                      ) : (
-                        stop.reasons.map((reason, i) => (
-                          <p key={i} className="text-[11px] text-parchment-600 leading-snug">{reason}</p>
-                        ))
-                      )}
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            ))}
-            {note && <p className="text-[11px] text-parchment-600 leading-relaxed border-t border-ink-700 pt-3">{note}</p>}
+
+            <ol className="relative">
+              {/* the route line joining the numbered stops */}
+              <span className="absolute left-[11px] top-3 bottom-3 w-px bg-line-strong" aria-hidden="true" />
+              {stages.map((stage, si) => (
+                <li key={`${stage.name}-${si}`} className="relative">
+                  <h3 className="relative pl-9 pt-2 pb-1 text-[11.5px] font-medium text-faint">{stage.name}</h3>
+                  <ol>
+                    {stage.items.map(({ stop, index }) => (
+                      <li key={stop.fileId} className="relative pl-9 pb-3.5">
+                        <span className="absolute left-0 top-0 grid place-items-center w-[23px] h-[23px] rounded-full bg-surface border border-line-strong text-[11px] font-semibold text-fg-soft tabular-nums">
+                          {index + 1}
+                        </span>
+
+                        {stop.members?.length > 0 ? (
+                          <div>
+                            <div className="text-[12.5px] font-medium text-fg">{stop.filePath}</div>
+                            <ul className="mt-1.5 space-y-1.5 border-l border-line pl-3">
+                              {stop.members.map((m) => (
+                                <li key={m.fileId}>
+                                  <button type="button" onClick={() => onSelectFile(m.fileId)} className="group text-left w-full">
+                                    <FileLabel path={m.filePath} />
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : (
+                          <button type="button" onClick={() => onSelectFile(stop.fileId)} className="group text-left w-full">
+                            <FileLabel path={stop.filePath} />
+                          </button>
+                        )}
+
+                        {stop.narrative ? (
+                          <p className="mt-1 text-[12px] text-fg-soft leading-snug">{stop.narrative}</p>
+                        ) : (
+                          stop.reasons.map((reason, i) => (
+                            <p key={i} className="mt-0.5 text-[11.5px] text-muted leading-snug">{reason}</p>
+                          ))
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                </li>
+              ))}
+            </ol>
+
+            {note && <p className="mt-1 border-t border-line pt-3 text-[11.5px] text-faint leading-relaxed">{note}</p>}
           </>
         )}
       </div>

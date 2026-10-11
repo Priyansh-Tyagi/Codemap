@@ -206,3 +206,32 @@ def test_real_demo_repo_produces_a_sensible_tour_in_both_modes():
         stops = _tour(result, mode)
         assert stops
         assert all(s["stage"] in ("Entry points", "Orchestrators", "Core logic", "Building blocks") for s in stops)
+
+
+def test_test_files_outside_a_tests_folder_are_excluded_too(tmp_path):
+    """Regression (PitSynapse): a root-level test_simulation.py showed up as an
+    'entry point' because only test FOLDERS were recognised, not test filenames."""
+    result = _build(tmp_path, {
+        "app/main.py": "from . import core\n", "app/core.py": "x = 1\n",
+        "test_core.py": "from app import core\n",
+        "app/core_test.py": "from . import core\n",
+        "web/App.jsx": "import './util';\n", "web/util.js": "export const u = 1;\n",
+        "web/App.test.jsx": "import './App';\n",
+    })
+    shown = " ".join(_paths(_tour(result)))
+    assert "test_core" not in shown and "core_test" not in shown and "App.test" not in shown
+    assert "app/main.py" in shown and "web/App.jsx" in shown
+
+
+def test_a_python_backend_and_a_js_frontend_are_both_traced(tmp_path):
+    """Regression (PitSynapse): once the backend's imports resolved, the tour
+    must cover both entry points rather than only the larger one."""
+    result = _build(tmp_path, {
+        "front/main.jsx": "import './App';\n", "front/App.jsx": "import './Page';\n",
+        "front/Page.jsx": "export default 1;\n",
+        "back/main.py": "from routes import api\n", "back/routes/api.py": "from services import svc\n",
+        "back/routes/__init__.py": "", "back/services/__init__.py": "",
+        "back/services/svc.py": "x = 1\n",
+    })
+    stops = _paths(_tour(result))
+    assert "front/main.jsx" in stops and "back/main.py" in stops

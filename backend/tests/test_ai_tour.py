@@ -166,7 +166,7 @@ def test_prompt_sends_structure_only_never_file_contents():
 
 def test_model_is_configurable_and_defaults_to_a_current_one(monkeypatch):
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
-    assert "gemini-2.5-flash:generateContent" in ai_tour_module._api_url()
+    assert f"{ai_tour_module.DEFAULT_GEMINI_MODEL}:generateContent" in ai_tour_module._api_url()
     assert "1.5" not in ai_tour_module._api_url()  # retired model must never come back as the default
     monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
     assert "models/gemini-3.6-flash:generateContent" in ai_tour_module._api_url()
@@ -198,15 +198,17 @@ def test_request_body_and_url_are_what_the_real_api_expects(monkeypatch):
         def json(self):
             return {"candidates": [{"content": {"parts": [{"text": "One sentence."}]}}]}
 
-    def fake_post(url, params=None, json=None, timeout=None):
-        captured.update(url=url, params=params, json=json, timeout=timeout)
+    def fake_post(url, params=None, headers=None, json=None, timeout=None):
+        captured.update(url=url, params=params, headers=headers, json=json, timeout=timeout)
         return Ok()
 
     monkeypatch.setattr(ai_tour_module.requests, "post", fake_post)
     out = ai_tour_module.narrate_tour("demo", [{"filePath": "a.py", "stage": "Foundation", "reasons": []}], {})
     assert out == ["One sentence."]
-    assert captured["url"].endswith("/models/gemini-2.5-flash:generateContent")
-    assert captured["params"] == {"key": "fake-key"}
+    assert captured["url"].endswith(f"/models/{ai_tour_module.DEFAULT_GEMINI_MODEL}:generateContent")
+    assert captured["headers"] == {"x-goog-api-key": "fake-key"}
+    assert captured["params"] is None            # the key must not travel in the URL
+    assert "fake-key" not in captured["url"]
     assert captured["json"]["contents"][0]["parts"][0]["text"]
     assert captured["timeout"] == ai_tour_module.REQUEST_TIMEOUT_SECONDS
 
@@ -321,3 +323,38 @@ def test_overlong_provider_message_is_truncated(monkeypatch):
     with pytest.raises(ai_tour_module.AINarrationError) as e:
         _narrate_with(monkeypatch, resp)
     assert len(str(e.value)) < 400
+
+
+@pytest.mark.parametrize("raw", ['  AIzaKEY  ', '"AIzaKEY"', "'AIzaKEY'", ' "AIzaKEY" '])
+def test_whitespace_and_quotes_pasted_around_the_key_are_stripped(monkeypatch, raw):
+    monkeypatch.setenv("GEMINI_API_KEY", raw)
+    captured = {}
+
+    class Ok:
+        ok = True
+        status_code = 200
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "One."}]}}]}
+
+    monkeypatch.setattr(ai_tour_module.requests, "post",
+                        lambda url, **k: captured.update(k) or Ok())
+    ai_tour_module.narrate_tour("demo", [{"filePath": "a.py", "stage": "x", "reasons": []}], {})
+    assert captured["headers"] == {"x-goog-api-key": "AIzaKEY"}
+
+
+def test_key_with_internal_whitespace_is_caught_before_calling_google(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaONE AIzaTWO")
+    monkeypatch.setattr(ai_tour_module.requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call Google")))
+    with pytest.raises(ai_tour_module.AINarrationError, match="whitespace"):
+        ai_tour_module.narrate_tour("demo", [{"filePath": "a.py", "stage": "x", "reasons": []}], {})
+
+
+def test_a_rejected_key_is_diagnosed_in_the_server_log_without_leaking_it(monkeypatch, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ai_tour_module.AINarrationError):
+            _narrate_with(monkeypatch, _Resp(401, {"error": {"message": "invalid credentials"}}))
+    text = caplog.text
+    assert "starts with 'AIza'" in text            # shows the first 4 chars + length...
+    assert "AIza-SECRET-KEY" not in text           # ...but never the whole key

@@ -13,17 +13,33 @@ treat it as external (a third-party package or stdlib module), the same
 way JS treats "react" as external without even trying to resolve it -
 Python just doesn't give us that answer for free, so we have to check.
 
+Where an absolute import is looked for (first match wins):
+  1. the project root;
+  2. <project root>/src, the conventional src-layout;
+  3. each parent directory of the importing file, nearest first.
+(3) mirrors how Python actually runs most apps: it puts the running
+script's directory on sys.path, so a backend started from backend/ writes
+`from routes.simulation import router` even though routes/ is not at the
+repo root. This was found on a real project whose Python backend showed zero
+connections: every one of its imports was relative to backend/, and a
+resolver that only tried the repo root classified all of them as external.
+Standard-library names (sys.stdlib_module_names) are never resolved through
+(3), so a local folder named `json` or `types` can't capture `import json`.
+
 Deliberately NOT a full Python import-system reimplementation - documented
 limitation. Does not distinguish regular packages (with __init__.py) from
-implicit namespace packages (PEP 420) - both are treated the same way
-(any directory is a valid package for resolution purposes). Does not
-support a `src/`-layout project where the real package root is nested
-below the project root passed in.
+implicit namespace packages (PEP 420) - both are treated the same way (any
+directory is a valid package for resolution purposes). Does not read
+sys.path edits or PYTHONPATH, so a project that relies on those to find code
+outside the importing file's own ancestors is still not resolved.
 """
 
 from __future__ import annotations
 
 import os
+import sys
+
+_STDLIB = getattr(sys, "stdlib_module_names", frozenset())
 
 
 class ResolutionKind:
@@ -65,6 +81,25 @@ def _within_project_root(resolved_abs: str, project_root: str) -> bool:
     )
 
 
+def _absolute_import_roots(importing_file: str, project_root: str, top_level: str) -> list[str]:
+    """Directories an absolute import may be resolved against, in priority order."""
+    root = os.path.abspath(project_root)
+    roots = [root]
+    src = os.path.join(root, "src")
+    if os.path.isdir(src):
+        roots.append(src)
+    if top_level not in _STDLIB:
+        directory = os.path.dirname(os.path.abspath(importing_file))
+        while directory != root and _within_project_root(directory, root):
+            if directory not in roots:
+                roots.append(directory)
+            parent = os.path.dirname(directory)
+            if parent == directory:
+                break
+            directory = parent
+    return roots
+
+
 def resolve_python_import(
     importing_file: str, module_path: str, level: int, project_root: str,
     is_bare_dot_name: bool = False,
@@ -85,15 +120,19 @@ def resolve_python_import(
         form gets that fallback - `from .foo import x` requires `foo` itself
         to be a real module, so it must resolve on its own.
     """
+    segments = module_path.split(".")
+
     if level == 0:
-        base_dir = os.path.abspath(project_root)
+        resolved = None
+        for base_dir in _absolute_import_roots(importing_file, project_root, segments[0]):
+            candidate_base = os.path.normpath(os.path.join(base_dir, *segments))
+            resolved = _try_module_file(candidate_base) or _try_package_init(candidate_base)
+            if resolved:
+                break
     else:
         base_dir = _package_dir_for(importing_file, level)
-
-    segments = module_path.split(".")
-    candidate_base = os.path.normpath(os.path.join(base_dir, *segments))
-
-    resolved = _try_module_file(candidate_base) or _try_package_init(candidate_base)
+        candidate_base = os.path.normpath(os.path.join(base_dir, *segments))
+        resolved = _try_module_file(candidate_base) or _try_package_init(candidate_base)
 
     if resolved is None and is_bare_dot_name and level > 0:
         # Not a submodule - try the containing package's own __init__.py,

@@ -106,10 +106,10 @@ describe("GuidedTour", () => {
     const user = userEvent.setup();
     setup();
 
-    await user.click(await screen.findByRole("button", { name: "✨ Narrate with AI" }));
+    await user.click(await screen.findByRole("button", { name: "Narrate with AI" }));
     expect(narrateProjectTour).toHaveBeenCalledWith("abc", "trace");
     expect(await screen.findByText("This is where the app starts.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "✨ Narrate with AI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Narrate with AI" })).not.toBeInTheDocument();
   });
 
   it("changing direction clears narration so it can't describe the wrong stops", async () => {
@@ -119,11 +119,11 @@ describe("GuidedTour", () => {
     ));
     const user = userEvent.setup();
     setup();
-    await user.click(await screen.findByRole("button", { name: "✨ Narrate with AI" }));
+    await user.click(await screen.findByRole("button", { name: "Narrate with AI" }));
     await screen.findByText("Narrated.");
 
     await user.click(screen.getByRole("button", { name: "Core first" }));
-    expect(await screen.findByRole("button", { name: "✨ Narrate with AI" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Narrate with AI" })).toBeInTheDocument();
     expect(screen.queryByText("Narrated.")).not.toBeInTheDocument();
   });
 
@@ -135,11 +135,11 @@ describe("GuidedTour", () => {
     const user = userEvent.setup();
     setup();
 
-    await user.click(await screen.findByRole("button", { name: "✨ Narrate with AI" }));
+    await user.click(await screen.findByRole("button", { name: "Narrate with AI" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("not configured on this server");
     expect(screen.getByText("a.py")).toBeInTheDocument();
     expect(screen.getByText("notable")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "✨ Narrate with AI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Narrate with AI" })).toBeInTheDocument();
   });
 
   it("a failed narrate request still doesn't break the panel", async () => {
@@ -147,7 +147,7 @@ describe("GuidedTour", () => {
     narrateProjectTour.mockRejectedValue(new Error("Network Error"));
     const user = userEvent.setup();
     setup();
-    await user.click(await screen.findByRole("button", { name: "✨ Narrate with AI" }));
+    await user.click(await screen.findByRole("button", { name: "Narrate with AI" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't reach the backend");
     expect(screen.getByText("a.py")).toBeInTheDocument();
   });

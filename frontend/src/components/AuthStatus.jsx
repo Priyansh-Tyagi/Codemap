@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { LogIn } from "lucide-react";
 import { getCurrentUser, logout, redirectToGitHubLogin } from "../services/auth";
 
 /**
@@ -38,29 +39,30 @@ export default function AuthStatus() {
       <button
         type="button"
         onClick={redirectToGitHubLogin}
-        className="flex items-center gap-1.5 border border-ink-600 hover:border-brass-500 text-parchment-200 text-[12px] font-mono px-3 py-1 rounded-sm transition-colors"
+        className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-line-strong text-[12.5px] font-medium text-fg-soft hover:text-fg hover:bg-surface-2 transition-colors"
       >
+        <LogIn size={14} aria-hidden="true" />
         Sign in with GitHub
       </button>
     );
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2 h-8 pl-1 pr-2.5 rounded-full border border-line bg-surface">
       {user.avatarUrl && (
         <img
           src={user.avatarUrl}
           alt={`${user.login}'s GitHub avatar`}
-          className="w-5 h-5 rounded-full"
+          className="w-6 h-6 rounded-full"
           referrerPolicy="no-referrer"
         />
       )}
-      <span className="text-[12px] font-mono text-parchment-300">{user.login}</span>
+      <span className="text-[12.5px] font-medium text-fg">{user.login}</span>
       <button
         type="button"
         onClick={handleLogout}
         disabled={loggingOut}
-        className="text-[12px] font-mono text-parchment-500 hover:text-parchment-200 disabled:opacity-40"
+        className="text-[12px] text-muted hover:text-fg disabled:opacity-40"
       >
         Sign out
       </button>

@@ -57,7 +57,14 @@ CODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py"}
 NOISE_DIRS = {"examples", "example", "docs", "doc", "demo", "demos", "sample", "samples",
               "benchmarks", "benchmark", "fixtures", "e2e", "scripts",
               "test", "tests", "__tests__", "spec", "specs"}
-_NOISE_NAME = re.compile(r"(^|/)([^/]*\.config\.(js|cjs|mjs|ts)|conftest\.py|setupTests\.(js|ts))$")
+_NOISE_NAME = re.compile(
+    r"(^|/)("
+    r"[^/]*\.config\.(js|cjs|mjs|ts)"          # vite.config.js, eslint.config.js, ...
+    r"|conftest\.py|setupTests\.(js|ts)"
+    r"|test_[^/]*\.py|[^/]*_test\.py"          # test files that live outside a tests/ folder
+    r"|[^/]*\.(test|spec)\.[jt]sx?"
+    r")$"
+)
 
 
 def _basename(path: str) -> str:
@@ -175,7 +182,7 @@ def generate_tour(
     if isolated_count:
         noun = "file has" if isolated_count == 1 else "files have"
         note = (f"{isolated_count} other {noun} no import connections to the rest of the project "
-                f"(for example code that talks to the rest over HTTP), so can't be placed in this tour.")
+                f"(standalone scripts, or code that talks to the rest over HTTP), so can't be placed in this tour.")
     return {"stops": stops, "note": note}
 
 

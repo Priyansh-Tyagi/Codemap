@@ -33,10 +33,13 @@ server for narration is the shape of the graph, not the code in it.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
@@ -55,8 +58,14 @@ class AINarrationError(Exception):
     turned into a graceful fallback - never allowed to surface as a 500."""
 
 
+def _api_key() -> str:
+    """The configured key, with the whitespace and wrapping quotes that
+    creep in when a key is pasted into a .env file removed."""
+    return os.environ.get("GEMINI_API_KEY", "").strip().strip("\"'").strip()
+
+
 def is_configured() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY"))
+    return bool(_api_key())
 
 
 def _provider_message(resp) -> str:
@@ -70,7 +79,7 @@ def _provider_message(resp) -> str:
         message = resp.json().get("error", {}).get("message", "")
     except Exception:
         return ""
-    key = os.environ.get("GEMINI_API_KEY", "")
+    key = _api_key()
     if key:
         message = message.replace(key, "[redacted]")
     message = " ".join(str(message).split())
@@ -80,6 +89,15 @@ def _provider_message(resp) -> str:
 def _explain_http_error(resp) -> str:
     status = resp.status_code
     detail = _provider_message(resp)
+    if status in (400, 401, 403):
+        # Server-side only (this is your own backend console, never sent to the
+        # browser): enough to spot a malformed key without printing all of it.
+        key = _api_key()
+        logger.warning(
+            "Gemini rejected the API key (HTTP %s). Key is %d characters and starts with %r; "
+            "keys from aistudio.google.com/apikey normally start with 'AIza'.",
+            status, len(key), key[:4],
+        )
     hint = {
         400: "the request or API key was rejected",
         401: "the API key was not accepted",
@@ -147,13 +165,23 @@ def narrate_tour(project_label: str, stops: list[dict], architecture_summary: di
     if not stops:
         return []
 
+    key = _api_key()
+    if any(ch.isspace() for ch in key):
+        raise AINarrationError(
+            "GEMINI_API_KEY contains whitespace - it looks like more than one value was pasted. "
+            "Paste only the key itself in backend/app/.env."
+        )
+
     _check_rate_limit()
 
     prompt = _build_prompt(project_label, stops, architecture_summary)
     try:
         resp = requests.post(
             _api_url(),
-            params={"key": os.environ["GEMINI_API_KEY"]},
+            # Header, not a ?key= query parameter: it's how Google's current docs
+            # authenticate, and it keeps the key out of URLs (which end up in
+            # proxy logs and exception messages).
+            headers={"x-goog-api-key": key},
             json={"contents": [{"parts": [{"text": prompt}]}]},
             timeout=REQUEST_TIMEOUT_SECONDS,
         )

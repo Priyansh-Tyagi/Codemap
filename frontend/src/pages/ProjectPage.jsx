@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
+import { Check, Compass, FolderOpen, GitBranch, Link2, Loader2, Lock, Plus } from "lucide-react";
 import Wordmark from "../components/Wordmark";
 import AuthStatus from "../components/AuthStatus";
+import ThemeToggle from "../components/ThemeToggle";
 import GuidedTour from "../components/GuidedTour";
 import GraphView from "../components/GraphView";
 import DetailsPanel from "../components/DetailsPanel";
@@ -105,65 +107,72 @@ export default function ProjectPage() {
 
   if (status === "notfound") return <NotFound />;
 
+  const ghost =
+    "inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-line-strong text-[12.5px] font-medium text-fg-soft hover:text-fg hover:bg-surface-2 transition-colors";
+
   return (
-    <div className="h-screen w-screen flex flex-col bg-ink-950">
-      <header className="flex items-center gap-3 px-4 h-14 border-b border-ink-700 bg-ink-900 flex-shrink-0">
+    <div className="h-screen w-screen flex flex-col bg-page">
+      <header className="h-14 px-4 flex items-center gap-3 flex-shrink-0">
         <Wordmark />
         {stats && (
-          <span className="text-[12px] font-mono text-parchment-400 truncate max-w-md">
-            {stats.sourceLabel}
+          <span
+            className="hidden sm:inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-surface border border-line text-[12px] font-mono text-fg-soft min-w-0 max-w-md"
+            title={stats.sourceLabel}
+          >
+            {stats.sourceType === "github" ? <GitBranch size={13} aria-hidden="true" /> : <FolderOpen size={13} aria-hidden="true" />}
+            <span className="truncate">{stats.sourceLabel}</span>
           </span>
         )}
         {stats?.isPrivate && (
-          <span className="text-[10px] font-mono uppercase tracking-wide text-brass-400 border border-brass-800 rounded-sm px-1.5 py-0.5">
+          <span className="inline-flex items-center gap-1 h-6 px-2 rounded-full border border-line-strong text-[11.5px] font-medium text-fg-soft">
+            <Lock size={11} aria-hidden="true" />
             Private
           </span>
         )}
         <div className="flex-1" />
-        <AuthStatus />
         {justAnalyzedCached && status === "ready" && (
-          <span className="text-[11px] font-mono text-brass-400 whitespace-nowrap">
-            served from cache
+          <span className="text-[12px] text-faint whitespace-nowrap">served from cache</span>
+        )}
+        {copyFailed && (
+          <span role="alert" className="text-danger text-[12px]">
+            Couldn't copy — copy the address bar instead
           </span>
         )}
+        <ThemeToggle />
         {status === "ready" && (
           <button
             type="button"
             onClick={() => setTourOpen((v) => !v)}
-            className="border border-ink-600 hover:border-brass-500 text-parchment-200 text-[12px] font-mono px-3 py-1 rounded-sm transition-colors"
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-accent text-accent-fg text-[12.5px] font-medium hover:opacity-90 transition-opacity"
           >
+            <Compass size={14} aria-hidden="true" />
             {tourOpen ? "Close tour" : "Guided tour"}
           </button>
         )}
         {status === "ready" && (
-          <button
-            type="button"
-            onClick={copyLink}
-            className="border border-ink-600 hover:border-brass-500 text-parchment-200 text-[12px] font-mono px-3 py-1 rounded-sm transition-colors"
-          >
+          <button type="button" onClick={copyLink} className={ghost}>
+            {copied ? <Check size={14} aria-hidden="true" /> : <Link2 size={14} aria-hidden="true" />}
             {copied ? "Copied!" : "Copy link"}
           </button>
         )}
-        {copyFailed && (
-          <span role="alert" className="text-flag-400 text-[11px] font-mono">
-            Couldn't copy — copy the address bar instead
-          </span>
-        )}
-        <Link to="/" className="text-[12px] font-mono text-brass-400 hover:text-brass-300">
+        <Link to="/" className={ghost}>
+          <Plus size={14} aria-hidden="true" />
           New analysis
         </Link>
+        <AuthStatus />
       </header>
 
-      <main className="flex-1 flex overflow-hidden relative">
+      <main className="flex-1 min-h-0 flex gap-3 px-3 pb-3 relative">
         {status === "loading" && (
-          <CenterMessage>Loading project…</CenterMessage>
+          <CenterMessage>
+            <Loader2 size={18} className="animate-spin text-muted mb-2" aria-hidden="true" />
+            Loading project…
+          </CenterMessage>
         )}
-        {status === "error" && (
-          <CenterMessage>{errorMessage}</CenterMessage>
-        )}
+        {status === "error" && <CenterMessage>{errorMessage}</CenterMessage>}
         {status === "ready" && (
           <>
-            <aside className="w-60 border-r border-ink-700 bg-ink-900 flex-shrink-0 flex flex-col">
+            <aside className="w-64 flex-shrink-0 rounded-2xl bg-surface border border-line shadow-soft flex flex-col overflow-hidden">
               <FilterPanel
                 nodes={graph.nodes}
                 filters={filters}
@@ -171,29 +180,21 @@ export default function ProjectPage() {
                 onClear={() => setFilters(emptyFilters())}
                 visibleCount={visibleNodes.length}
               />
-              <div className="flex-1 overflow-y-auto">
-                <FileTree
-                  nodes={visibleNodes}
-                  selectedNodeId={selectedNodeId}
-                  onSelect={(node) => selectFile(node.id)}
-                />
+              <div className="flex-1 min-h-0">
+                <FileTree nodes={visibleNodes} selectedNodeId={selectedNodeId} onSelect={(node) => selectFile(node.id)} />
               </div>
             </aside>
 
-            <div className="flex-1">
+            <section className="flex-1 min-w-0 rounded-2xl overflow-hidden border border-line bg-stage relative">
               {graph.nodes.length === 0 ? (
-                <CenterMessage>
-                  No JavaScript, TypeScript, or Python files found in this project.
-                </CenterMessage>
+                <CenterMessage>No JavaScript, TypeScript, or Python files found in this project.</CenterMessage>
               ) : visibleNodes.length === 0 ? (
                 <div className="h-full flex items-center justify-center">
                   <div className="text-center">
-                    <p className="text-[13px] text-parchment-500">
-                      No files match the current filters.
-                    </p>
+                    <p className="text-[13px] text-muted">No files match the current filters.</p>
                     <button
                       onClick={() => setFilters(emptyFilters())}
-                      className="mt-3 text-[12px] text-brass-400 hover:text-brass-300 font-mono"
+                      className="mt-3 text-[13px] font-medium text-fg underline underline-offset-2"
                     >
                       Clear filters
                     </button>
@@ -208,20 +209,16 @@ export default function ProjectPage() {
                   selectedNodeId={selectedNodeId}
                 />
               )}
-            </div>
+            </section>
 
-            <aside className="w-72 border-l border-ink-700 bg-ink-900 flex-shrink-0 overflow-y-auto">
+            <aside className="w-72 flex-shrink-0 rounded-2xl bg-surface border border-line shadow-soft overflow-y-auto">
               <DetailsPanel node={selectedNode} stats={stats} />
               <ImportsPanel node={selectedNode} edges={graph.edges} />
               <ImpactPanel projectId={projectId} filePath={selectedNodeId} onSelectFile={selectFile} />
             </aside>
 
             {tourOpen && (
-              <GuidedTour
-                projectId={projectId}
-                onSelectFile={selectFile}
-                onClose={() => setTourOpen(false)}
-              />
+              <GuidedTour projectId={projectId} onSelectFile={selectFile} onClose={() => setTourOpen(false)} />
             )}
           </>
         )}
@@ -232,27 +229,30 @@ export default function ProjectPage() {
 
 function CenterMessage({ children }) {
   return (
-    <div className="flex-1 h-full flex items-center justify-center px-4">
-      <p className="text-[13px] text-parchment-500 max-w-sm text-center leading-relaxed">
-        {children}
-      </p>
+    <div className="flex-1 h-full flex flex-col items-center justify-center px-4 text-center">
+      <div className="text-[13.5px] text-muted max-w-sm leading-relaxed flex flex-col items-center">{children}</div>
     </div>
   );
 }
 
 function NotFound() {
   return (
-    <div className="h-screen w-screen flex flex-col bg-ink-950">
-      <header className="flex items-center px-4 h-14 border-b border-ink-700 bg-ink-900">
+    <div className="h-screen w-screen flex flex-col bg-page">
+      <header className="h-14 px-5 flex items-center gap-3">
         <Wordmark />
+        <div className="flex-1" />
+        <ThemeToggle />
       </header>
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-center">
-          <h1 className="font-display text-xl text-parchment-100">Project not found</h1>
-          <p className="mt-2 text-[13px] text-parchment-500 max-w-sm">
+      <div className="flex-1 flex items-center justify-center px-5">
+        <div className="text-center max-w-sm">
+          <h1 className="text-2xl font-semibold tracking-tight text-fg">Project not found</h1>
+          <p className="mt-2 text-[14px] text-muted leading-relaxed">
             This link may be mistyped, or the project may no longer be stored.
           </p>
-          <Link to="/" className="mt-4 inline-block text-[13px] font-mono text-brass-400 hover:text-brass-300">
+          <Link
+            to="/"
+            className="mt-5 inline-flex items-center h-10 px-5 rounded-xl bg-accent text-accent-fg text-[14px] font-medium hover:opacity-90"
+          >
             Analyze a repository
           </Link>
         </div>

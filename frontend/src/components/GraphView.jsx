@@ -1,6 +1,7 @@
 import { forwardRef, useImperativeHandle, useMemo } from "react";
 import ReactFlow, {
   Background,
+  BackgroundVariant,
   Controls,
   MiniMap,
   ReactFlowProvider,
@@ -82,14 +83,14 @@ function GraphViewInner({ nodes, edges, onNodeClick, selectedNodeId }, ref) {
           // and ends up overshooting the nodes, which is what showed up
           // in testing. A bezier arcs cleanly around instead.
           type: isFeedbackEdge ? "default" : "smoothstep",
-          markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
+          markerEnd: { type: MarkerType.ArrowClosed, color, width: 12, height: 12 },
           style: {
             stroke: color,
-            strokeWidth: connected && highlight ? 2 : 1.25,
+            strokeWidth: connected && highlight ? 2.25 : 1.5,
             strokeDasharray: isFeedbackEdge ? "4 3" : undefined,
             // quiet ambient state (nothing selected) so the graph doesn't
             // read as a tangle at rest; edges brighten on selection instead
-            opacity: highlight ? (connected ? 0.9 : 0.06) : 0.35,
+            opacity: highlight ? (connected ? 0.95 : 0.07) : 0.5,
             transition: "opacity 200ms, stroke-width 200ms",
           },
         };
@@ -108,15 +109,17 @@ function GraphViewInner({ nodes, edges, onNodeClick, selectedNodeId }, ref) {
       minZoom={0.05}
       proOptions={{ hideAttribution: true }}
     >
-      <Background color="#161a24" gap={28} size={1} />
-      <Controls className="[&_button]:bg-ink-800 [&_button]:border-ink-600 [&_button]:fill-parchment-300" />
+      <Background variant={BackgroundVariant.Dots} gap={22} size={1.6} />
+      <Controls showInteractive={false} />
       <MiniMap
+        pannable
+        zoomable
         nodeColor={(n) =>
           n.data?.node?.inCycle ? CYCLE_COLOR : colorForCategory(n.data?.node?.architectureType)
         }
         nodeStrokeWidth={0}
-        maskColor="rgba(11, 14, 20, 0.78)"
-        style={{ background: "#12161f", border: "1px solid #232838" }}
+        nodeBorderRadius={3}
+        style={{ width: 150, height: 100 }}
       />
     </ReactFlow>
   );
@@ -126,7 +129,7 @@ const ForwardedGraphViewInner = forwardRef(GraphViewInner);
 
 /** Public component: wraps the inner view in a ReactFlowProvider so useReactFlow works. */
 const GraphView = forwardRef((props, ref) => (
-  <div className="h-full w-full bg-ink-950">
+  <div className="h-full w-full bg-stage">
     <ReactFlowProvider>
       <ForwardedGraphViewInner {...props} ref={ref} />
     </ReactFlowProvider>

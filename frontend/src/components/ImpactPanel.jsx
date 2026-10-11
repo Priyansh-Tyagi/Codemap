@@ -30,18 +30,16 @@ export default function ImpactPanel({ projectId, filePath, onSelectFile }) {
   if (!filePath) return null;
 
   return (
-    <div className="px-4 py-4 border-t border-ink-700">
-      <h3 className="font-display text-[12px] font-medium text-parchment-300">
-        Change impact
-      </h3>
+    <div className="px-4 py-4 border-t border-line">
+      <h3 className="text-[12px] font-semibold text-fg">Change impact</h3>
 
-      {loading && <p className="mt-2 text-[12px] text-parchment-700">Checking...</p>}
+      {loading && <p className="mt-2 text-[12px] text-faint">Checking...</p>}
 
       {!loading && impact && (
         <>
-          <p className="mt-2 text-[13px] text-parchment-300">
+          <p className="mt-2 text-[13px] text-muted leading-relaxed">
             Changing this file could affect{" "}
-            <span className="font-mono text-parchment-100">{impact.estimatedAffected}</span>{" "}
+            <span className="font-semibold text-fg tabular-nums">{impact.estimatedAffected}</span>{" "}
             other {impact.estimatedAffected === 1 ? "file" : "files"}.
           </p>
 
@@ -65,13 +63,13 @@ function ImpactGroup({ label, files, onSelectFile }) {
   if (files.length === 0) return null;
   return (
     <div className="mt-3">
-      <p className="text-[11px] text-parchment-500">{label}</p>
+      <p className="text-[11px] font-medium text-muted">{label}</p>
       <ul className="mt-1 space-y-0.5">
         {files.map((fileId) => (
           <li key={fileId}>
             <button
               onClick={() => onSelectFile(fileId)}
-              className="w-full text-left truncate font-mono text-[12px] text-parchment-300 hover:text-brass-400 px-1.5 py-0.5 rounded-sm hover:bg-ink-800"
+              className="w-full text-left truncate font-mono text-[12px] text-fg-soft hover:text-fg px-1.5 py-1 rounded-md hover:bg-surface-2"
             >
               {fileId}
             </button>
