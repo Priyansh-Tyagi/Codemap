@@ -10,10 +10,12 @@ import DetailsPanel from "../components/DetailsPanel";
 import ImportsPanel from "../components/ImportsPanel";
 import FileTree from "../components/FileTree";
 import FilterPanel from "../components/FilterPanel";
+import FocusControls from "../components/FocusControls";
 import ImpactPanel from "../components/ImpactPanel";
-import { getProjectGraph, getProjectSummary } from "../services/api";
+import { getProjectGraph, getProjectSummary, getProjectTour } from "../services/api";
 import { describeApiError } from "../utils/apiError";
 import { emptyFilters, computeVisibleNodeIds } from "../utils/filterNodes";
+import { LARGE_GRAPH_THRESHOLD, neighborhoodIds, pickFocusStart } from "../utils/focusNeighborhood";
 
 export default function ProjectPage() {
   const { projectId } = useParams();
@@ -30,6 +32,8 @@ export default function ProjectPage() {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
+  // Focus mode: draw only the selected file's neighborhood. Large projects open in it.
+  const [focus, setFocus] = useState({ enabled: false, hops: 1 });
   const graphRef = useRef(null);
 
   // The URL is the single source of truth: this runs identically whether the
@@ -40,15 +44,46 @@ export default function ProjectPage() {
     setGraph(null);
     setSelectedNodeId(null);
     setFilters(emptyFilters());
+    setFocus({ enabled: false, hops: 1 });
 
-    Promise.all([getProjectGraph(projectId), getProjectSummary(projectId)])
-      .then(([graphData, summary]) => {
+    async function load() {
+      try {
+        const [graphData, summary] = await Promise.all([
+          getProjectGraph(projectId),
+          getProjectSummary(projectId),
+        ]);
         if (cancelled) return;
+
+        // A big graph drawn all at once is an unreadable column of tiny boxes,
+        // so large projects open focused on the guided tour's first entry
+        // point (deterministic, no AI). Resolved BEFORE the first render so the
+        // user never sees the full hairball flash up first.
+        let startId = null;
+        const large = graphData.nodes.length > LARGE_GRAPH_THRESHOLD;
+        if (large) {
+          const ids = new Set(graphData.nodes.map((n) => n.id));
+          try {
+            const tour = await getProjectTour(projectId, "trace");
+            for (const stop of tour.stops ?? []) {
+              const candidates = [stop.fileId, ...(stop.members ?? []).map((m) => m.fileId)];
+              startId = candidates.find((id) => ids.has(id)) ?? null;
+              if (startId) break;
+            }
+          } catch {
+            // tour unavailable: fall through to the local heuristic
+          }
+          startId ??= pickFocusStart(graphData.nodes);
+          if (cancelled) return;
+        }
+
         setGraph(graphData);
         setStats(summary);
+        if (large && startId) {
+          setSelectedNodeId(startId);
+          setFocus({ enabled: true, hops: 1 });
+        }
         setStatus("ready");
-      })
-      .catch((err) => {
+      } catch (err) {
         if (cancelled) return;
         if (err.response?.status === 404) {
           setStatus("notfound");
@@ -56,7 +91,9 @@ export default function ProjectPage() {
           setErrorMessage(describeApiError(err));
           setStatus("error");
         }
-      });
+      }
+    }
+    load();
 
     return () => {
       cancelled = true;
@@ -87,9 +124,39 @@ export default function ProjectPage() {
     if (selectedNodeId && !visibleNodeIds.has(selectedNodeId)) setSelectedNodeId(null);
   }, [visibleNodeIds, selectedNodeId]);
 
+  // Focus mode is a view over the FILTERED graph, so the two compose. The file
+  // tree keeps using visibleNodes (not this) so any file stays one click away.
+  const focusRootId =
+    focus.enabled && selectedNodeId && visibleNodeIds.has(selectedNodeId) ? selectedNodeId : null;
+  const focusIds = useMemo(
+    () => (focusRootId ? neighborhoodIds(visibleEdges, focusRootId, focus.hops) : null),
+    [focusRootId, visibleEdges, focus.hops]
+  );
+  const graphNodes = useMemo(
+    () => (focusIds ? visibleNodes.filter((n) => focusIds.has(n.id)) : visibleNodes),
+    [focusIds, visibleNodes]
+  );
+  const graphEdges = useMemo(
+    () => (focusIds ? visibleEdges.filter((e) => focusIds.has(e.source) && focusIds.has(e.target)) : visibleEdges),
+    [focusIds, visibleEdges]
+  );
+  // Remounts the canvas (which re-fits the view) whenever the focused set changes.
+  const fitKey = focusRootId ? `focus:${focusRootId}:${focus.hops}` : "full";
+
   function selectFile(fileId) {
     setSelectedNodeId(fileId);
-    if (fileId) graphRef.current?.focusNode(fileId);
+    // In focus mode the whole canvas re-centers on the new file instead.
+    if (fileId && !focus.enabled) graphRef.current?.focusNode(fileId);
+  }
+
+  function toggleFocus() {
+    if (focus.enabled) {
+      setFocus((f) => ({ ...f, enabled: false }));
+      return;
+    }
+    setFocus((f) => ({ ...f, enabled: true }));
+    // Nothing selected yet: start somewhere sensible rather than do nothing.
+    if (!selectedNodeId) setSelectedNodeId(pickFocusStart(visibleNodes));
   }
 
   async function copyLink() {
@@ -203,10 +270,24 @@ export default function ProjectPage() {
               ) : (
                 <GraphView
                   ref={graphRef}
-                  nodes={visibleNodes}
-                  edges={visibleEdges}
-                  onNodeClick={(node) => selectFile(node?.id ?? null)}
+                  nodes={graphNodes}
+                  edges={graphEdges}
+                  fitKey={fitKey}
+                  // Clicking empty canvas clears the selection - except in focus
+                  // mode, where that would throw away the file being focused on.
+                  onNodeClick={(node) => (node || !focus.enabled) && selectFile(node?.id ?? null)}
                   selectedNodeId={selectedNodeId}
+                />
+              )}
+              {visibleNodes.length > 0 && (
+                <FocusControls
+                  enabled={focus.enabled}
+                  hops={focus.hops}
+                  hasSelection={Boolean(focusRootId)}
+                  shownCount={graphNodes.length}
+                  totalCount={visibleNodes.length}
+                  onToggle={toggleFocus}
+                  onHopsChange={(hops) => setFocus((f) => ({ ...f, hops }))}
                 />
               )}
             </section>

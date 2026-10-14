@@ -25,7 +25,7 @@ function connectedNodeIds(edges, nodeId) {
   return connected;
 }
 
-function GraphViewInner({ nodes, edges, onNodeClick, selectedNodeId }, ref) {
+function GraphViewInner({ nodes, edges, onNodeClick, selectedNodeId, fitKey }, ref) {
   const instance = useReactFlow();
 
   useImperativeHandle(ref, () => ({
@@ -100,6 +100,10 @@ function GraphViewInner({ nodes, edges, onNodeClick, selectedNodeId }, ref) {
 
   return (
     <ReactFlow
+      // Remounting on fitKey re-runs the initial fit-to-view, which is how the
+      // canvas re-frames when focus mode changes the set of drawn nodes. It is
+      // constant outside focus mode, so selecting a file never resets the zoom.
+      key={fitKey}
       nodes={flowNodes}
       edges={flowEdges}
       nodeTypes={nodeTypes}

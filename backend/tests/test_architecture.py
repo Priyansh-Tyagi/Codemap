@@ -36,10 +36,13 @@ def test_page_and_view_both_map_to_page():
 
 
 def test_test_filename_marker_without_test_folder():
-    assert classify_architecture("src/utils/format.test.js") == "Util"
-    # Note: "utils" folder rule matches before the filename-based test check,
-    # since folder rules are checked first. This documents that behavior
-    # rather than treating it as a bug - folder location is a stronger signal.
+    # Changed deliberately: this used to assert "Util" (folder rules beat the
+    # filename marker). Colocated tests (Button.test.tsx beside Button.tsx) are
+    # extremely common, and calling them by their neighbor's category inflates
+    # that category's counts and the test file's risk. A file named *.test.* is
+    # a test wherever it lives.
+    assert classify_architecture("src/utils/format.test.js") == "Test"
+    assert classify_architecture("src/components/Button.test.tsx") == "Test"
 
 
 def test_test_folder_takes_precedence_over_no_folder():
@@ -102,3 +105,35 @@ def test_filename_rule_takes_precedence_over_folder_rule():
 
 def test_plain_python_file_with_no_convention_is_unknown():
     assert classify_architecture("myapp/helpers.py") == "Unknown"
+
+
+
+# --- test files are Test regardless of the folders around them -------------
+
+import pytest
+
+
+@pytest.mark.parametrize("path", [
+    "backend/tests/api/routes/test_login.py",     # real case: the deeper "routes" folder used to win
+    "backend/tests/crud/test_user.py",
+    "tests/models.py",                             # a filename rule ("models.py") must not beat the tests dir
+    "app/services/test_billing.py",                # pytest naming, outside any tests dir
+    "app/services/billing_test.py",
+    "src/__tests__/utils/format.js",
+    "src/components/Button.test.tsx",
+    "src/lib/format.spec.ts",
+])
+def test_test_files_are_classified_as_tests_whatever_folder_they_sit_in(path):
+    assert classify_architecture(path) == "Test"
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("app/api/routes/items.py", "Route"),          # non-test files keep their normal category
+    ("blog/models.py", "Model"),
+    ("src/lib/utils.ts", "Util"),
+    ("app/contest_results.py", "Unknown"),         # "test" inside a word is not a test
+    ("app/latest_news.py", "Unknown"),
+    ("app/testing_utils.py", "Unknown"),           # starts with "test" but not "test_"
+])
+def test_non_test_files_are_not_swept_up_as_tests(path, expected):
+    assert classify_architecture(path) == expected

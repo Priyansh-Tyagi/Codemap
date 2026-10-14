@@ -42,6 +42,7 @@ The interface is neutral and **colour is reserved for data**: the only saturated
 - **GitHub Actions CI check** — the same analysis engine, wrapped as a CLI and a composite GitHub Action (`action.yml`), that gates a pull request on newly-introduced circular dependencies or files crossing a risk threshold, posting the result as a PR comment. See "CI/CD integration" below.
 - **Local or GitHub URL input** — analyze a directory on your own machine, or paste a public GitHub repo URL (`https://github.com/owner/repo`, optionally `/tree/branch`) and CodeMap downloads a one-shot tarball snapshot, analyzes it, and cleans up the temp files automatically. No `git clone`, no commit history fetched.
 - **Sign in with GitHub** — OAuth sign-in gets you your own 5,000/hour GitHub API rate limit (instead of sharing the server's) and the ability to analyze your own private repositories. Entirely optional: every feature above works fully anonymously. See "GitHub sign-in" below.
+- **Focus mode** — a 150-file graph drawn all at once is an unreadable column of tiny boxes, and dimming doesn't fix that (dimmed nodes still take layout space). Focus mode draws only the selected file and the files within 1–3 import-steps of it (either direction), composes with the category/risk/folder filters, and re-fits the view on every change. Projects over 60 files open focused on the guided tour's first entry point (deterministic, no AI; falls back to a local heuristic that skips test files). On the FastAPI template that is 5 files instead of 152. The file tree still lists everything, so any file is one click from re-centering.
 - **Path-alias resolution** — `@/lib/utils`-style imports (tsconfig `paths`/`baseUrl`/`extends`, Vite `resolve.alias`, `@/` → `src/`) become real graph edges instead of being miscounted as npm packages. Resolved per package so monorepos work, never cached across runs, and the GitHub extractor keeps the config files so URL analyses get the same result. Measured on real repos: the FastAPI full-stack template went from 162 to 365 edges (0 lost, isolated files 55 → 19); shadcn's Taxonomy went from a completely disconnected graph (0 edges) to 259.
 - **GitHub result caching** — a repeat analysis of the same repo+ref within 10 minutes is served instantly from memory, skipping both the download and the re-parse entirely (a "Force refresh" checkbox bypasses this when you want fresh data sooner). Local paths are never cached — caching your own actively-edited files would risk silently showing stale results.
 - **AST-based import extraction** — uses Babel (`@babel/parser` + `@babel/traverse`) via a small Node subprocess, so JSX and TypeScript syntax are understood natively rather than approximated with regex.
@@ -494,7 +495,7 @@ of spawning fresh each time — not yet done.
 
 ## Testing
 
-Backend: 279 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 293 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,
@@ -528,7 +529,7 @@ cd backend
 python -m pytest tests\ -v
 ```
 
-Frontend: 63 `vitest` tests (jsdom + Testing Library) covering the filter
+Frontend: 94 `vitest` tests (jsdom + Testing Library) covering the filter
 predicates, the dagre layout (isolated-file grid, no overlaps, feedback
 edges), the HomePage analyze-then-navigate flow, the ProjectPage
 fetch-by-URL / not-found / backend-down / copy-link (including clipboard
