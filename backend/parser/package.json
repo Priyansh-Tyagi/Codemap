@@ -5,7 +5,7 @@
   "description": "Standalone Babel-based AST parser bridge for CodeMap. Not a server - invoked as a one-shot CLI process by the Python backend.",
   "main": "parse.js",
   "dependencies": {
-    "@babel/parser": "^7.25.0",
+    "@babel/parser": "^8.0.7",
     "@babel/traverse": "^7.25.0"
   }
 }
