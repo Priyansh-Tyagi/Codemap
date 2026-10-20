@@ -6,6 +6,6 @@
   "main": "parse.js",
   "dependencies": {
     "@babel/parser": "^7.25.0",
-    "@babel/traverse": "^7.25.0"
+    "@babel/traverse": "^8.0.7"
   }
 }
