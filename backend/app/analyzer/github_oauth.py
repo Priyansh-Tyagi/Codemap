@@ -81,6 +81,31 @@ def exchange_code_for_token(code: str, redirect_uri: str) -> str:
     return token
 
 
+def revoke_token(access_token: str) -> bool:
+    """
+    Best-effort: ask GitHub to invalidate this OAuth token (DELETE
+    /applications/{client_id}/token, authenticated as the OAuth App). Returns
+    whether GitHub confirmed. Never raises - sign-out must work even if
+    GitHub is unreachable.
+    """
+    if not is_configured():
+        return False
+    try:
+        resp = requests.delete(
+            f"https://api.github.com/applications/{_client_id()}/token",
+            auth=(_client_id(), _client_secret()),
+            headers={"Accept": "application/vnd.github+json"},
+            json={"access_token": access_token},
+            timeout=5,
+        )
+    except requests.RequestException:
+        return False
+    return resp.status_code == 204
+
+
+_AVATAR_HOST_PREFIX = "https://avatars.githubusercontent.com/"
+
+
 def fetch_github_user(access_token: str) -> dict:
     """Returns {"login": ..., "avatarUrl": ...}. Raises GitHubOAuthError on failure."""
     resp = requests.get(
@@ -91,4 +116,8 @@ def fetch_github_user(access_token: str) -> dict:
     if not resp.ok:
         raise GitHubOAuthError(f"Could not fetch GitHub user profile ({resp.status_code})")
     body = resp.json()
-    return {"login": body["login"], "avatarUrl": body.get("avatar_url")}
+    avatar = body.get("avatar_url")
+    # Only ever hand the browser a GitHub-hosted avatar URL to load.
+    if not (isinstance(avatar, str) and avatar.startswith(_AVATAR_HOST_PREFIX)):
+        avatar = None
+    return {"login": body["login"], "avatarUrl": avatar}

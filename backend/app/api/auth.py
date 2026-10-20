@@ -22,7 +22,7 @@ from fastapi.responses import RedirectResponse, JSONResponse
 
 from analyzer.github_oauth import (
     GitHubOAuthError, build_authorize_url, exchange_code_for_token,
-    fetch_github_user, is_configured,
+    fetch_github_user, is_configured, revoke_token,
 )
 from services import store
 
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 SESSION_COOKIE = "codemap_session"
 STATE_COOKIE = "codemap_oauth_state"
-SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 days
+SESSION_MAX_AGE_SECONDS = store.SESSION_MAX_AGE_SECONDS  # 30 days; the server enforces it too
 STATE_MAX_AGE_SECONDS = 60 * 10  # 10 minutes - just long enough to complete the redirect round trip
 
 
@@ -48,6 +48,10 @@ def _cookie_security() -> dict:
     """
     if os.environ.get("CODEMAP_COOKIE_SECURE", "").lower() == "true":
         return {"secure": True, "samesite": "none"}
+    if _frontend_url().lower().startswith("https://"):
+        # Same-site HTTPS deployment: Secure is free and a plain-HTTP request
+        # must never be able to carry the session cookie.
+        return {"secure": True, "samesite": "lax"}
     return {"secure": False, "samesite": "lax"}
 
 
@@ -62,14 +66,32 @@ def _frontend_url() -> str:
     return os.environ.get("CODEMAP_FRONTEND_URL", "http://localhost:5173")
 
 
-def get_session_id(request: Request) -> str | None:
-    return request.cookies.get(SESSION_COOKIE)
-
-
 def get_current_session(request: Request) -> store.SessionRecord | None:
-    """None if there's no cookie, an unknown session, or a session whose
-    token can't be decrypted - all equivalent to "not signed in"."""
-    return store.get_session(get_session_id(request))
+    """
+    The signed-in session for this request, or None for no cookie, an unknown
+    or expired session, or one whose token can't be decrypted. Memoized on the
+    request, since several helpers ask within one request.
+    """
+    cached = getattr(request.state, "codemap_session", _MISSING)
+    if cached is not _MISSING:
+        return cached
+    session = store.get_session(request.cookies.get(SESSION_COOKIE))
+    request.state.codemap_session = session
+    return session
+
+
+_MISSING = object()
+
+
+def get_session_id(request: Request) -> str | None:
+    """
+    The caller's identity for ownership and cache scoping: the hashed key of a
+    VALID session, or None. It is deliberately not the raw cookie. Trusting
+    any cookie value here let a visitor with a made-up cookie be treated as a
+    signed-in user (and own "private" projects under that made-up name).
+    """
+    session = get_current_session(request)
+    return session.session_id if session else None
 
 
 def get_access_token_for_request(request: Request) -> str | None:
@@ -111,7 +133,7 @@ def github_callback(request: Request, code: str | None = None, state: str | None
 
     if error:
         return _fail(f"GitHub sign-in was cancelled ({error})")
-    if not code or not state or not cookie_state or state != cookie_state:
+    if not code or not state or not cookie_state or not secrets.compare_digest(state, cookie_state):
         return _fail("GitHub sign-in failed (invalid or expired state - please try again)")
 
     try:
@@ -141,7 +163,14 @@ def get_me(request: Request):
 
 @router.post("/logout")
 def logout(request: Request):
-    store.delete_session(get_session_id(request))
+    session = get_current_session(request)
+    if session is not None:
+        # Revoke the token at GitHub too. It carries the broad `repo` scope, so
+        # merely forgetting it here would leave a live credential behind
+        # (including in any copy of the database). Best effort: never blocks
+        # the logout itself.
+        revoke_token(session.access_token)
+    store.delete_session(request.cookies.get(SESSION_COOKIE))
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response

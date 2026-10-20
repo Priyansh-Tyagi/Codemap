@@ -13,13 +13,21 @@ name: CodeMap Check
       - "examples/demo-repo/**"
   workflow_dispatch: {} # allows manually triggering a run from the Actions tab
 
+# Least privilege: nothing is writable unless a job asks for it below.
+permissions:
+  contents: read
+
 jobs:
   codemap-check:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write # needed for the PR-comment step in action.yml
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned (see action.yml for why); no credentials left in .git for later steps.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Run CodeMap check
         uses: ./

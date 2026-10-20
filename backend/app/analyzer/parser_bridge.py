@@ -18,6 +18,24 @@ PARSER_SCRIPT = os.path.join(
 )
 
 
+NODE_MAX_HEAP_MB = 1536
+
+# The parser only needs to find `node` and a temp dir. Everything else in the
+# server's environment - GITHUB_TOKEN, the OAuth client secret, the Fernet
+# key, the Gemini key - is none of its business. @babel/parser does not
+# execute the code it reads, so this is defense in depth: if a parser bug or
+# a malicious dependency ever did run attacker-influenced code, there would
+# be no secrets in its environment to steal.
+_CHILD_ENV_ALLOWLIST = (
+    "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+    "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LANG", "LC_ALL",
+)
+
+
+def _child_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k.upper() in _CHILD_ENV_ALLOWLIST}
+
+
 class ParserBridgeError(RuntimeError):
     pass
 
@@ -38,11 +56,14 @@ def parse_files(file_paths: list[str], timeout_seconds: int = 60) -> list[dict]:
 
     try:
         proc = subprocess.run(
-            ["node", os.path.abspath(PARSER_SCRIPT)],
+            # Capped heap: a pathological file must not be able to take the
+            # whole machine's memory, only fail its own parse.
+            ["node", f"--max-old-space-size={NODE_MAX_HEAP_MB}", os.path.abspath(PARSER_SCRIPT)],
             input=payload,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=_child_env(),
         )
     except FileNotFoundError as exc:
         raise ParserBridgeError(

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter, HTTPException, Request
 
+from analyzer.scanner import ScanLimitError
 from graph.builder import build_dependency_graph
 from analyzer.github_fetcher import fetch_github_repo, parse_github_url, GitHubFetchError
 from api.auth import get_access_token_for_request, get_session_id
@@ -14,7 +17,7 @@ from models.schemas import (
     EdgeOut,
     FileListItem,
 )
-from services import store
+from services import ratelimit, security, store
 
 router = APIRouter(tags=["projects"])
 
@@ -42,10 +45,20 @@ def _node_to_out(record, node_id: str) -> NodeOut:
     )
 
 
+def _public_root(record) -> str:
+    """
+    GitHub analyses run in a throwaway temp directory; its path is server
+    internals and means nothing to the caller, so report the repo label
+    instead. A local analysis's own path is, by definition, what the caller
+    supplied (and local mode is off on public servers).
+    """
+    return record.source_label if record.source_type == "github" else record.root
+
+
 def _record_to_analyze_response(record, cached: bool) -> AnalyzeResponse:
     return AnalyzeResponse(
         projectId=record.project_id,
-        rootPath=record.root,
+        rootPath=_public_root(record),
         sourceType=record.source_type,
         sourceLabel=record.source_label,
         fileCount=record.graph.number_of_nodes(),
@@ -62,6 +75,10 @@ def _record_to_analyze_response(record, cached: bool) -> AnalyzeResponse:
 
 @router.post("/analyze", response_model=AnalyzeResponse)
 def analyze_repository(request: AnalyzeRequest, http_request: Request) -> AnalyzeResponse:
+    # Local folders: refused unless this is a developer's own machine (see
+    # services/security.py). Checked first, before anything touches the disk.
+    local_path = security.resolve_local_path(request.path) if request.path else None
+
     access_token = get_access_token_for_request(http_request)
     session_id = get_session_id(http_request)
 
@@ -93,6 +110,10 @@ def analyze_repository(request: AnalyzeRequest, http_request: Request) -> Analyz
                 if record:
                     return _record_to_analyze_response(record, cached=True)
 
+    # Everything below is the expensive part (download, subprocess, parsing).
+    # Cached GitHub hits returned above and cost nothing, so they don't count.
+    ratelimit.check(http_request, "analyze", *security.analyze_rate())
+
     fetched = None
 
     if request.githubUrl:
@@ -104,7 +125,7 @@ def analyze_repository(request: AnalyzeRequest, http_request: Request) -> Analyz
         source_type = "github"
         source_label = f"{fetched.owner}/{fetched.repo}@{fetched.ref}"
     else:
-        target_path = request.path
+        target_path = local_path
         source_type = "local"
         source_label = target_path
 
@@ -115,6 +136,8 @@ def analyze_repository(request: AnalyzeRequest, http_request: Request) -> Analyz
             raise HTTPException(status_code=400, detail=f"path does not exist: {target_path}")
         except NotADirectoryError:
             raise HTTPException(status_code=400, detail=f"path is not a directory: {target_path}")
+        except ScanLimitError as e:
+            raise HTTPException(status_code=413, detail=str(e))
 
         is_private = bool(fetched and fetched.is_private)
         if is_private and not session_id:
@@ -153,8 +176,11 @@ def _get_record_or_404(project_id: str, http_request: Request):
     record = store.get_project(project_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"unknown project_id: {project_id}")
-    if record.is_private and record.owner_session_id != get_session_id(http_request):
-        raise HTTPException(status_code=404, detail=f"unknown project_id: {project_id}")
+    if record.is_private:
+        caller = get_session_id(http_request)  # hashed key of a VALID session, or None
+        owner = record.owner_session_id or ""
+        if caller is None or not secrets.compare_digest(owner, caller):
+            raise HTTPException(status_code=404, detail=f"unknown project_id: {project_id}")
     return record
 
 
@@ -168,7 +194,7 @@ def get_project_summary(project_id: str, http_request: Request) -> ProjectSummar
     )
     return ProjectSummary(
         projectId=record.project_id,
-        rootPath=record.root,
+        rootPath=_public_root(record),
         sourceType=record.source_type,
         sourceLabel=record.source_label,
         fileCount=record.graph.number_of_nodes(),

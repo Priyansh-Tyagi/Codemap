@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from models.schemas import CycleOut, MetricsResponse, TourResponse, TourStopOut
 from api.projects import _get_record_or_404
 from graph.tour import generate_tour
 from analyzer.ai_tour import narrate_tour, AINarrationError
-from services import store
+from services import ratelimit, security, store
 import collections
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["graph"])
@@ -88,6 +88,14 @@ def narrate_project_tour(project_id: str, http_request: Request, mode: str = Tou
         for stop, text in zip(stops, cached):
             stop["narrative"] = text
         return respond(narrated=True)
+
+    # Per-client cap on top of the server-wide one in ai_tour: otherwise a single
+    # visitor can use up everyone's narration budget. Degrades like every other
+    # narration problem - the deterministic tour is still returned.
+    try:
+        ratelimit.check(http_request, "narrate", *security.narrate_rate())
+    except HTTPException as e:
+        return respond(error=str(e.detail))
 
     architecture_summary = dict(collections.Counter(record.architecture.values()))
     try:

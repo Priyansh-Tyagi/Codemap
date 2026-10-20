@@ -21,6 +21,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 
 import requests
@@ -34,10 +35,28 @@ GITHUB_API = "https://api.github.com"
 MAX_REPO_SIZE_KB = 200_000  # ~200MB - generous for MVP-sized repos, rejects huge monorepos
 REQUEST_TIMEOUT_SECONDS = 30
 
+# Budgets for the untrusted download. GitHub's own "size" field is checked
+# first, but it describes the repo on disk, not what the tarball expands to:
+# a repo of many highly-compressible files can inflate by orders of magnitude,
+# so what is actually read is bounded here too.
+MAX_TARBALL_BYTES = 250 * 1024 * 1024          # compressed bytes downloaded
+MAX_UNPACKED_BYTES = 1024 * 1024 * 1024        # sum of all entries' declared sizes
+MAX_EXTRACTED_FILE_BYTES = 2 * 1024 * 1024     # per extracted source file (matches the scanner)
+MAX_EXTRACTED_FILES = 20_000
+MAX_TARBALL_ENTRIES = 200_000
+DOWNLOAD_DEADLINE_SECONDS = 120                # total wall clock, not per read (slow-drip defense)
+
+# GitHub's real naming rules, strictly: owner = alphanumerics and single hyphens
+# (max 39); repo = alphanumerics, '.', '_', '-' (max 100). Anything looser let
+# "." and ".." through, and since these are pasted into an API path the HTTP
+# client normalizes "/repos/../user" to "/user" - i.e. a request to a different
+# GitHub endpoint carrying the signed-in user's token.
 _GITHUB_URL_RE = re.compile(
-    r"^https?://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?"
-    r"(?:/tree/(?P<ref>[\w./-]+))?/?$"
+    r"^https?://github\.com/(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
+    r"(?P<repo>[A-Za-z0-9._-]{1,100}?)(?:\.git)?"
+    r"(?:/tree/(?P<ref>[\w./-]{1,255}))?/?$"
 )
+_REF_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 
 
 class GitHubFetchError(Exception):
@@ -71,8 +90,17 @@ def parse_github_url(url: str) -> tuple[str, str, str | None]:
     """
     match = _GITHUB_URL_RE.match(url.strip())
     if not match:
-        raise GitHubFetchError(f"Doesn't look like a GitHub repository URL: {url}")
-    return match.group("owner"), match.group("repo"), match.group("ref")
+        raise GitHubFetchError(f"Doesn't look like a GitHub repository URL: {url[:200]}")
+    owner, repo, ref = match.group("owner"), match.group("repo"), match.group("ref")
+    if repo in (".", "..") or repo.endswith(".lock"):
+        raise GitHubFetchError(f"Doesn't look like a GitHub repository URL: {url[:200]}")
+    if ref is not None:
+        # Each path segment must be a plain name: no "..", no empty segment
+        # ("a//b"), no leading "-" or ".". Otherwise it could climb out of
+        # /tarball/ into another API path.
+        if not all(_REF_SEGMENT_RE.match(seg) and seg not in (".", "..") for seg in ref.split("/")):
+            raise GitHubFetchError("That branch or ref name isn't valid.")
+    return owner, repo, ref
 
 
 def _github_headers(access_token: str | None = None) -> dict:
@@ -149,22 +177,37 @@ def _safe_extract(tar: tarfile.TarFile, dest: str) -> int:
     Extracts the source files from the tarball into dest and returns how many
     wanted files could not be written (e.g. path too long on Windows).
 
-    Two protections: a manual check that no entry escapes dest via '../'
-    ("tar slip"), plus tarfile's own filter="data" where available. A single
-    unwritable file is skipped and counted rather than failing the whole
-    analysis.
+    Protections: no entry may escape dest via '../' or an absolute path ("tar
+    slip"); only regular files are ever extracted (never symlinks, hardlinks
+    or devices); tarfile's own filter="data" where available; and hard budgets
+    on entry count, total declared size and per-file size so a decompression
+    bomb stops early instead of filling the disk. The entries are walked as a
+    stream so the budget check fires while reading, not after everything has
+    been decompressed. A single unwritable file is skipped and counted rather
+    than failing the whole analysis.
     """
     dest_abs = os.path.abspath(dest)
-    members = tar.getmembers()
-    for member in members:
+    members: list[tarfile.TarInfo] = []
+    declared_total = 0
+    for member in tar:
         member_path = os.path.abspath(os.path.join(dest, member.name))
         if not (member_path == dest_abs or member_path.startswith(dest_abs + os.sep)):
             raise GitHubFetchError("Tarball contains an unsafe path, refusing to extract")
+        members.append(member)
+        declared_total += max(member.size, 0)
+        if len(members) > MAX_TARBALL_ENTRIES or declared_total > MAX_UNPACKED_BYTES:
+            raise GitHubFetchError("Repository is too large to analyze once unpacked")
 
     skipped = 0
+    extracted = 0
     for member in members:
         if not _wanted_member(member):
             continue
+        if member.size > MAX_EXTRACTED_FILE_BYTES:
+            continue  # generated/minified bundles: not worth parsing, and the scanner would skip them too
+        extracted += 1
+        if extracted > MAX_EXTRACTED_FILES:
+            raise GitHubFetchError("Repository has too many source files to analyze")
         try:
             try:
                 tar.extract(member, dest, filter="data")
@@ -185,6 +228,15 @@ def fetch_github_repo(url: str, access_token: str | None = None) -> FetchedRepo:
     owner, repo, ref = parse_github_url(url)
 
     metadata = _get_repo_metadata(owner, repo, access_token)
+    if metadata.get("private") and not access_token:
+        # Reachable only via the SERVER-wide GITHUB_TOKEN, which may be able to
+        # see its owner's private repos. Never serve those to an anonymous
+        # visitor - and answer exactly like a missing repo, so this can't be
+        # used to discover which private repos exist.
+        raise GitHubFetchError(
+            f"Repository not found (or private - sign in with GitHub to analyze "
+            f"your own private repos): {owner}/{repo}"
+        )
     size_kb = metadata.get("size", 0)
     if size_kb > MAX_REPO_SIZE_KB:
         raise GitHubFetchError(
@@ -194,7 +246,9 @@ def fetch_github_repo(url: str, access_token: str | None = None) -> FetchedRepo:
 
     resolved_ref = ref or metadata.get("default_branch") or "HEAD"
 
-    tarball_url = f"{GITHUB_API}/repos/{owner}/{repo}/tarball/{resolved_ref}"
+    # resolved_ref is either user input validated by parse_github_url or GitHub's
+    # own default_branch - quote it anyway so it can only ever be one path piece.
+    tarball_url = f"{GITHUB_API}/repos/{owner}/{repo}/tarball/{requests.utils.quote(resolved_ref, safe='/')}"
     resp = requests.get(
         tarball_url, headers=_github_headers(access_token), timeout=REQUEST_TIMEOUT_SECONDS, stream=True
     )
@@ -206,9 +260,17 @@ def fetch_github_repo(url: str, access_token: str | None = None) -> FetchedRepo:
     tmp_dir = tempfile.mkdtemp(prefix="codemap-gh-")
     try:
         tarball_path = os.path.join(tmp_dir, "repo.tar.gz")
+        downloaded = 0
+        deadline = time.monotonic() + DOWNLOAD_DEADLINE_SECONDS
         with open(tarball_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
+            for chunk in resp.iter_content(chunk_size=65536):
+                downloaded += len(chunk)
+                if downloaded > MAX_TARBALL_BYTES:
+                    raise GitHubFetchError(f"{owner}/{repo} is too large to download for analysis")
+                if time.monotonic() > deadline:
+                    raise GitHubFetchError(f"Downloading {owner}/{repo} took too long")
                 f.write(chunk)
+        resp.close()
 
         with tarfile.open(tarball_path, "r:gz") as tar:
             skipped = _safe_extract(tar, tmp_dir)

@@ -23,6 +23,7 @@ import time. Creating them on import meant merely importing this module
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -30,12 +31,13 @@ import time
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import networkx as nx
 
 from graph.builder import BuildResult
 from graph.analysis import run_full_analysis
+from services import security
 
 # GitHub-only: local paths are never cached, because caching a path the
 # user may be editing would silently serve stale results.
@@ -151,7 +153,14 @@ def _connect() -> sqlite3.Connection:
     path = _db_path()
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
+    is_new_file = not os.path.exists(path)
     conn = sqlite3.connect(path, timeout=10)
+    if is_new_file:
+        # The DB holds encrypted GitHub tokens and private-repo graphs: owner-only.
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # e.g. Windows - best effort
     if _initialized_path != path:
         conn.executescript(_SCHEMA)
         _migrate(conn)
@@ -232,7 +241,34 @@ def create_project(
                     record.owner_session_id,
                 ),
             )
+            _prune_projects(conn)
     return record
+
+
+def _prune_projects(conn: sqlite3.Connection) -> None:
+    """
+    Every analysis is stored forever (that is what makes share links work),
+    so without a ceiling anyone could fill the disk one request at a time.
+    Beyond CODEMAP_MAX_PROJECTS the OLDEST projects (and their cache rows)
+    are dropped. Deliberate trade-off: a very old share link can stop
+    working; a full disk takes down every link.
+    """
+    excess = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] - security.max_projects()
+    if excess <= 0:
+        return
+    old_ids = [
+        row[0]
+        for row in conn.execute(
+            "SELECT project_id FROM projects ORDER BY created_at ASC LIMIT ?", (excess,)
+        )
+    ]
+    for pid in old_ids:
+        conn.execute("DELETE FROM projects WHERE project_id = ?", (pid,))
+        conn.execute("DELETE FROM github_cache WHERE project_id = ?", (pid,))
+        # narration cache keys are "<project_id>:<mode>"
+        conn.execute(
+            "DELETE FROM ai_tour_cache WHERE project_id = ? OR project_id LIKE ?", (pid, pid + ":%")
+        )
 
 
 def get_project(project_id: str) -> ProjectRecord | None:
@@ -296,6 +332,10 @@ def set_github_cache(cache_key: str, project_id: str) -> None:
     with closing(_connect()) as conn:
         with conn:
             conn.execute(
+                "DELETE FROM github_cache WHERE cached_at < ?",
+                (time.time() - GITHUB_CACHE_TTL_SECONDS,),
+            )
+            conn.execute(
                 "INSERT OR REPLACE INTO github_cache (cache_key, project_id, cached_at)"
                 " VALUES (?,?,?)",
                 (cache_key, project_id, time.time()),
@@ -315,14 +355,27 @@ def clear_all() -> None:
 # ---------------------------------------------------------------------------
 # Sessions (GitHub OAuth)
 # ---------------------------------------------------------------------------
-# A session row maps an opaque, unguessable session_id (the only thing that
+# A session row maps an opaque, unguessable session id (the only thing that
 # ever leaves the server, as an HttpOnly cookie) to an encrypted GitHub
-# access token plus the little bit of profile info the UI shows. No
-# expires_at column: sessions last until logout or the user clears cookies.
-# A short-lived, auto-expiring session was considered and rejected - this is
-# a portfolio tool a recruiter might revisit after the tab's been closed
-# for a day, and "silently logged out" is a worse experience than "still
-# signed in" for that use case. Revocation (logout) is still immediate.
+# access token plus the little bit of profile info the UI shows.
+#
+# The raw cookie value is a bearer credential, so it is NEVER stored: rows
+# are keyed by its SHA-256 (`session_key`). That same key is what private
+# projects record as their owner and what scopes the per-user GitHub cache,
+# so a copy of the database (a backup, a leaked file) cannot be replayed as
+# a login. The cookie is 256 bits of randomness, so an unsalted fast hash is
+# appropriate - there is nothing to brute-force.
+#
+# Sessions last 30 days from sign-in, the same lifetime the cookie claims.
+# (Earlier the server never enforced it, so a stolen cookie worked forever.)
+# Deliberately NOT shortened further: a recruiter revisiting after a day
+# should still be signed in. Logout revokes immediately.
+
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+
+
+def session_key(raw_session_id: str) -> str:
+    return hashlib.sha256(raw_session_id.encode()).hexdigest()
 
 
 @dataclass
@@ -335,39 +388,55 @@ class SessionRecord:
 
 
 def create_session(session_id: str, github_login: str, github_avatar_url: str | None, access_token: str) -> None:
+    """`session_id` is the raw cookie value; only its hash is stored."""
     from services.crypto import encrypt_token
 
+    now = datetime.now(timezone.utc)
     with closing(_connect()) as conn:
         with conn:
+            # Housekeeping: drop sessions nobody can use any more.
+            cutoff = (now - timedelta(seconds=SESSION_MAX_AGE_SECONDS)).isoformat()
+            conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
             conn.execute(
                 "INSERT OR REPLACE INTO sessions"
                 " (session_id, github_login, github_avatar_url, encrypted_token, created_at)"
                 " VALUES (?,?,?,?,?)",
                 (
-                    session_id, github_login, github_avatar_url,
-                    encrypt_token(access_token),
-                    datetime.now(timezone.utc).isoformat(),
+                    session_key(session_id), github_login, github_avatar_url,
+                    encrypt_token(access_token), now.isoformat(),
                 ),
             )
 
 
 def get_session(session_id: str | None) -> SessionRecord | None:
-    """None for a missing session_id, an unknown session, or one whose token
-    can no longer be decrypted (e.g. CODEMAP_SECRET_KEY changed or was never
-    set and the process restarted) - all three mean "not signed in", not a
-    server error."""
+    """
+    `session_id` is the raw cookie value. None for a missing id, an unknown or
+    expired session, or one whose token can no longer be decrypted (e.g.
+    CODEMAP_SECRET_KEY changed) - all mean "not signed in", not a server error.
+    The returned record's `session_id` is the HASHED key, i.e. the identity the
+    rest of the app should use for ownership and cache scoping.
+    """
     if not session_id:
         return None
     from services.crypto import decrypt_token
 
+    key = session_key(session_id)
     with closing(_connect()) as conn:
         row = conn.execute(
             "SELECT session_id, github_login, github_avatar_url, encrypted_token, created_at"
             " FROM sessions WHERE session_id = ?",
-            (session_id,),
+            (key,),
         ).fetchone()
-    if row is None:
-        return None
+        if row is None:
+            return None
+        try:
+            created = datetime.fromisoformat(row[4])
+        except ValueError:
+            created = None
+        if created is None or (datetime.now(timezone.utc) - created).total_seconds() > SESSION_MAX_AGE_SECONDS:
+            with conn:
+                conn.execute("DELETE FROM sessions WHERE session_id = ?", (key,))
+            return None
     token = decrypt_token(row[3])
     if token is None:
         return None
@@ -382,7 +451,7 @@ def delete_session(session_id: str | None) -> None:
         return
     with closing(_connect()) as conn:
         with conn:
-            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_key(session_id),))
 
 
 # ---------------------------------------------------------------------------

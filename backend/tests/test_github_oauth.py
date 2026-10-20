@@ -113,9 +113,14 @@ def test_logout_clears_the_session_cookie_and_invalidates_it(github_configured, 
     cb = client.get("/api/auth/github/callback?code=c&state=s", cookies={"codemap_oauth_state": "s"})
     sid = cb.cookies.get("codemap_session")
 
+    revoked = []
+    # Logout also asks GitHub to revoke the token; mocked so the test never calls GitHub.
+    monkeypatch.setattr(auth_module, "revoke_token", lambda token: revoked.append(token) or True)
+
     assert client.get("/api/auth/me", cookies={"codemap_session": sid}).json()["user"] is not None
     client.post("/api/auth/logout", cookies={"codemap_session": sid})
     assert client.get("/api/auth/me", cookies={"codemap_session": sid}).json() == {"user": None}
+    assert revoked == ["gho_x"]
 
 
 def test_session_token_is_never_stored_in_plaintext_in_the_db(github_configured, monkeypatch):

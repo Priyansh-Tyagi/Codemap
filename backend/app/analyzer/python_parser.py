@@ -86,8 +86,12 @@ def parse_python_file(absolute_path: str) -> dict:
 
     try:
         tree = ast.parse(source, filename=absolute_path)
-    except SyntaxError as e:
-        result["error"] = f"parse failed: {e}"
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as e:
+        # Not just SyntaxError: this parser runs inside the server process on
+        # untrusted files. A long `1+1+1+...` chain raises RecursionError, and
+        # a NUL byte raises ValueError - either one escaping would abort the
+        # analysis of the whole repository because of one hostile file.
+        result["error"] = f"parse failed: {type(e).__name__}: {str(e)[:200]}"
         return result
 
     for node in ast.walk(tree):

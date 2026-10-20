@@ -1,0 +1,12 @@
+# Security headers for Netlify (Vercel gets the same set from vercel.json).
+# src/securityHeaders.test.js fails if the two files or index.html drift apart.
+# CSP notes: the one inline script (theme bootstrap in index.html) is allowed by
+# its hash, not 'unsafe-inline'. style-src needs 'unsafe-inline' because React and
+# React Flow set inline style attributes. connect-src is 'self' https: - after you
+# deploy, tighten it to your exact API origin.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-ywnKwGUP4Q+9WTvdaqwLjAwjfaJDS6n0fBrdwy3ZUKs='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://avatars.githubusercontent.com; connect-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()

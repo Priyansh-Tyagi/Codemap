@@ -21,6 +21,20 @@ function encodeFilePath(filePath) {
   return filePath.split("/").map(encodeURIComponent).join("/");
 }
 
+/**
+ * What this server allows (e.g. whether analyzing a local folder is enabled).
+ * If it can't be reached, assume the restrictive answer: the server enforces
+ * its own limits regardless, so this only decides what the UI offers.
+ */
+export async function getServerConfig() {
+  try {
+    const { data } = await api.get("/config");
+    return { allowLocalPaths: Boolean(data.allowLocalPaths) };
+  } catch {
+    return { allowLocalPaths: false };
+  }
+}
+
 /** source: { path } for a local filesystem path, or { githubUrl } for a GitHub repo URL. */
 export async function analyzeRepository(source) {
   const { data } = await api.post("/analyze", source);

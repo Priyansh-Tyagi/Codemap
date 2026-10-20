@@ -1,0 +1,18 @@
+# Keeps pinned dependencies from silently going stale. Pinning (exact versions,
+# hashes, commit SHAs) is what makes installs reproducible and tamper-resistant;
+# Dependabot is what keeps that from turning into running year-old code. Each
+# update arrives as a normal PR, so it still goes through CI and review.
+version: 2
+updates:
+  - package-ecosystem: github-actions   # also rewrites the SHA pins (and their "# v5" comments)
+    directory: "/"
+    schedule: { interval: weekly }
+  - package-ecosystem: pip
+    directory: "/backend"
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: "/backend/parser"
+    schedule: { interval: weekly }

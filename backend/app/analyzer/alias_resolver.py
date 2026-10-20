@@ -136,8 +136,26 @@ def parse_jsonc(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _read(path: str) -> str | None:
+MAX_CONFIG_BYTES = 1024 * 1024  # real tsconfig/vite configs are a few KB
+
+
+def _inside(root: str, path: str) -> bool:
     try:
+        return os.path.commonpath([os.path.realpath(root), os.path.realpath(path)]) == os.path.realpath(root)
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def _read(path: str, root: str) -> str | None:
+    """
+    Read a config file from the analyzed repo - which is untrusted. It must
+    really live inside the project (a symlinked tsconfig.json pointing at some
+    other file on the machine is refused, as is an `extends` that climbs out
+    of the project) and be a sane size, since it is read whole and parsed.
+    """
+    try:
+        if not _inside(root, path) or os.path.getsize(path) > MAX_CONFIG_BYTES:
+            return None
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             return fh.read()
     except OSError:
@@ -165,12 +183,12 @@ def _resolve_extends(config_dir: str, ref: str) -> str | None:
     return None
 
 
-def _load_ts_options(path: str, seen: frozenset[str] = frozenset(), depth: int = 0) -> _TsOptions:
+def _load_ts_options(path: str, root: str, seen: frozenset[str] = frozenset(), depth: int = 0) -> _TsOptions:
     result = _TsOptions()
     real = os.path.abspath(path)
     if real in seen or depth > _MAX_EXTENDS_DEPTH:
         return result
-    text = _read(real)
+    text = _read(real, root)
     data = parse_jsonc(text) if text is not None else None
     if data is None:
         return result
@@ -186,7 +204,7 @@ def _load_ts_options(path: str, seen: frozenset[str] = frozenset(), depth: int =
         parent_path = _resolve_extends(config_dir, ref)
         if parent_path is None:
             continue
-        parent = _load_ts_options(parent_path, seen, depth + 1)
+        parent = _load_ts_options(parent_path, root, seen, depth + 1)
         if parent.base_url is not None:
             result.base_url = parent.base_url
         if parent.paths is not None:
@@ -418,7 +436,7 @@ class AliasResolver:
             path = os.path.join(directory, name)
             if not os.path.isfile(path):
                 continue
-            opts = _load_ts_options(path)
+            opts = _load_ts_options(path, self.root)
             if opts.base_url and cfg.base_url is None:
                 cfg.base_url = opts.base_url
             if opts.paths:
@@ -444,7 +462,7 @@ class AliasResolver:
         vite_rules: list[_Rule] = []
         for name in VITE_CONFIG_NAMES:
             path = os.path.join(directory, name)
-            text = _read(path) if os.path.isfile(path) else None
+            text = _read(path, self.root) if os.path.isfile(path) else None
             if text is None:
                 continue
             for key, target in parse_vite_aliases(text, directory):

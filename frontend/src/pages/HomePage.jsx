@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FolderOpen, GitBranch, Loader2 } from "lucide-react";
 import Wordmark from "../components/Wordmark";
 import AuthStatus from "../components/AuthStatus";
 import ThemeToggle from "../components/ThemeToggle";
 import HeroGraph from "../components/HeroGraph";
-import { analyzeRepository } from "../services/api";
+import { analyzeRepository, getServerConfig } from "../services/api";
 import { describeApiError } from "../utils/apiError";
 
 // Real, public repos that analyze well - so a visitor can see a result in
@@ -21,7 +21,28 @@ export default function HomePage() {
   const [forceRefresh, setForceRefresh] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [authError] = useState(() => new URLSearchParams(window.location.search).get("auth_error"));
+  // Shown on screen, and the value comes straight from the URL - anyone can
+  // craft a link whose ?auth_error= reads like an official instruction. React
+  // escapes it (no script risk), but strip control characters and cap the
+  // length so it can't be a long, convincing message.
+  const [authError] = useState(() => {
+    const raw = new URLSearchParams(window.location.search).get("auth_error");
+    return raw ? raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, 160) : null;
+  });
+  // Local-folder analysis is disabled on public servers (it would let any
+  // visitor browse the server's own files), so only offer it if this server says so.
+  const [allowLocal, setAllowLocal] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getServerConfig().then((cfg) => {
+      if (cancelled) return;
+      setAllowLocal(cfg.allowLocalPaths);
+      if (!cfg.allowLocalPaths) setSourceMode("github");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleAnalyze(e) {
     e.preventDefault();
@@ -71,14 +92,16 @@ export default function HomePage() {
             onSubmit={handleAnalyze}
             className="mt-8 rounded-2xl bg-surface border border-line shadow-float p-3"
           >
-            <div role="group" aria-label="Source type" className="inline-flex bg-surface-2 border border-line rounded-lg p-0.5">
-              <ModeButton active={sourceMode === "github"} onClick={() => setSourceMode("github")} Icon={GitBranch}>
-                GitHub URL
-              </ModeButton>
-              <ModeButton active={sourceMode === "local"} onClick={() => setSourceMode("local")} Icon={FolderOpen}>
-                Local path
-              </ModeButton>
-            </div>
+            {allowLocal && (
+              <div role="group" aria-label="Source type" className="inline-flex bg-surface-2 border border-line rounded-lg p-0.5">
+                <ModeButton active={sourceMode === "github"} onClick={() => setSourceMode("github")} Icon={GitBranch}>
+                  GitHub URL
+                </ModeButton>
+                <ModeButton active={sourceMode === "local"} onClick={() => setSourceMode("local")} Icon={FolderOpen}>
+                  Local path
+                </ModeButton>
+              </div>
+            )}
 
             <div className="mt-3 flex gap-2">
               <input

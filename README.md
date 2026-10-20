@@ -138,6 +138,8 @@ cd app
 python -m uvicorn main:app --reload --port 8000
 ```
 
+**Analyzing a folder on your own machine ("Local path") is off by default.** It lets whoever can reach the API read your filesystem's structure, which is only acceptable when that's just you. To enable it for local development, copy `backend\app\.env.example` to `backend\app\.env` and uncomment `CODEMAP_ALLOW_LOCAL_PATHS=true`. Without it, the UI simply offers GitHub URLs. (See "Security" below for why.)
+
 ### 2. Frontend
 
 In a second terminal:
@@ -284,11 +286,12 @@ grab once the app's running against `examples/demo-repo`:
 ## API reference
 
 FastAPI auto-generates interactive docs once the backend is running:
-`http://localhost:8000/docs`
+`http://localhost:8000/docs` (disabled when `CODEMAP_DISABLE_DOCS=true`, as in `render.yaml`).
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| POST | `/api/analyze` | `{ path }` or `{ githubUrl }` → runs the full pipeline, returns a `projectId` |
+| GET | `/api/config` | Non-secret server capabilities the UI adapts to (e.g. `allowLocalPaths`) |
+| POST | `/api/analyze` | `{ path }` (only if the server enables it) or `{ githubUrl }` → runs the full pipeline, returns a `projectId`. Rate-limited per client; cache hits are free |
 | GET | `/api/projects/{id}` | Project summary stats |
 | GET | `/api/projects/{id}/graph` | Full node + edge list |
 | GET | `/api/projects/{id}/files` | Lightweight file list |
@@ -493,9 +496,58 @@ of spawning fresh each time — not yet done.
 
 ---
 
+## Security
+
+CodeMap analyzes **untrusted input by design**: anyone can point a public deployment at any GitHub repo, and every file in it gets parsed. So the threat model is a hostile repository and a hostile anonymous visitor, not just a typo in a form. The codebase was audited by reading every entry point, then each suspected issue was **proven with a working exploit before being fixed**, and each fix is pinned by a regression test that was **mutation-checked** (the vulnerability was re-introduced and the test confirmed to fail). 83 of the 376 backend tests live in `backend/tests/test_security.py`.
+
+### What was found and fixed
+
+| Severity | Issue | Fix |
+|---|---|---|
+| High | **Any visitor could analyze any folder on the server** (`{"path": "/etc"}`): a filesystem-structure disclosure plus a path-existence oracle | Local paths are off unless `CODEMAP_ALLOW_LOCAL_PATHS=true`; optional `CODEMAP_LOCAL_PATH_ROOTS` allow-list resolved through symlinks; the UI hides the option via `/api/config` |
+| High (if the operator's `GITHUB_TOKEN` can see private repos) | **A forged session cookie was accepted as an identity**, so an anonymous visitor could analyze and then own "private" projects via the server's shared token | Identity is now only ever a *validated* session; private repos are refused before download when only the shared token is available, with the same message as "not found" |
+| Medium | **`..` in a GitHub URL** (`github.com/../user`) was normalized by the HTTP client into a *different* GitHub API endpoint, carrying the signed-in user's token | Strict owner/repo/ref grammar; dot-segments rejected; ref quoted into the URL |
+| Medium | **Sessions never expired server-side; the raw session id sat in the database** (a DB copy = account takeover); the `repo`-scoped GitHub token outlived logout | Sessions expire after the same 30 days the cookie claims; only a SHA-256 of the id is stored (and used as the private-project owner key); logout revokes the token at GitHub |
+| Medium | **Decompression bombs and unbounded downloads/repos**: no byte, entry, file-size or file-count caps | Streaming download cap + wall-clock deadline; tar entries counted and sized *while streaming*; per-file and file-count caps in the extractor and scanner |
+| Medium | **GitHub Action script injection**: `${{ inputs.* }}` expanded straight into bash (`$(whoami)` ran as root) | Inputs only via `env:`, validated, and confined to the workspace; no expression appears inside any script |
+| Medium | **No rate limiting** (CPU exhaustion, burning the shared GitHub token and the AI budget) | Per-client limits on uncached analyses and AI narration (cache hits stay free), a generous global limit, bounded memory |
+| Low | Scanner followed file symlinks out of the repo; config files from the repo were read unbounded | Symlinks skipped; configs must be inside the project, regular, and under 1 MB |
+| Low | One hostile `.py` (a long `1+1+1…` chain) raised an unhandled `RecursionError` and aborted the whole analysis | The full parser-failure family is caught per file |
+| Low | PR comment built from the PR author's file paths (markdown/`@mention` injection); comment lookup spoofable by any commenter; CI-log command injection via newline in a filename | Paths escaped with a CommonMark-correct code fence; hidden marker + bot-only lookup, paginated; control characters stripped |
+| Low | Repo-controlled text (names, paths) flowed raw into the Gemini prompt; AI limit was server-wide only | Sanitized, fenced as untrusted data, output length-capped; added a per-client limit |
+
+Hardening that wasn't a specific bug: Origin check on every state-changing request (on top of `SameSite`), CORS limited to the methods and headers actually used (a wildcard origin is refused at startup), security headers and `no-store` on every API response, `Secure` cookies whenever the frontend is HTTPS, constant-time OAuth state comparison, the Node parser launched with a scrubbed environment and a heap cap, owner-only database file, a ceiling on stored projects, a CSP for the frontend that allows the one inline script by hash (and a test that fails if they drift apart), SHA-pinned GitHub Actions, hash-locked Python dependencies (`requirements.lock`), `npm ci`, Dependabot to keep the pins fresh, and a clean `npm audit` / `pip-audit`.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CODEMAP_ALLOW_LOCAL_PATHS` | off | Allow analyzing folders on the server. Local development only |
+| `CODEMAP_LOCAL_PATH_ROOTS` | unset | If set, local analysis is confined to these folders |
+| `CODEMAP_ALLOWED_ORIGINS` | localhost:5173 | Exact frontend origin(s); `*` is refused |
+| `CODEMAP_ALLOWED_HOSTS` | any | Accepted `Host` headers |
+| `CODEMAP_DISABLE_DOCS` | off | Hide `/docs`, `/redoc`, `/openapi.json` |
+| `CODEMAP_ANALYZE_LIMIT` / `_WINDOW_SECONDS` | 12 / 600 | Uncached analyses per client |
+| `CODEMAP_NARRATE_LIMIT` | 6 per hour | AI narrations per client |
+| `CODEMAP_GLOBAL_LIMIT` | 600 per minute | Any API request per client |
+| `CODEMAP_MAX_PROJECTS` | 5000 | Oldest saved projects are dropped beyond this |
+
+### What this does NOT cover (be honest about it)
+
+- **The OAuth `repo` scope is broad.** A classic OAuth App cannot request read-only private-repo access; only a GitHub App can. Mitigations are in place (encrypted at rest, revoked on logout, 30-day expiry) but the real fix is migrating to a GitHub App with fine-grained permissions.
+- **The rate limiter is in-memory and per-process**, which matches the single-worker deployment but would need a shared store (Redis) if you ever ran several workers. It also depends on `--forwarded-allow-ips` being right for your host; clients behind one NAT share a budget.
+- **Prompt injection is contained, not prevented.** The AI only fills a short plain-text field, the input is sanitized and fenced, and the output is capped and rendered as text; a determined attacker can still influence a sentence of narration about their own repo.
+- **Private-repo graphs are stored unencrypted in SQLite** (only the GitHub tokens are encrypted). Use disk-level encryption on the host.
+- **The CSP keeps `style-src 'unsafe-inline'`** (React and React Flow set inline styles) and starts with `connect-src https:` until you pin your API origin.
+- **No audit logging, alerting or per-user quotas**, and **no external penetration test**.
+- **Not yet verified live:** a real OAuth round trip, the security headers on a real host, and the Action's PR-comment step (it needs a live token and an open PR). The Action's shell logic and every other fix is tested with real inputs.
+- `requirements.lock` is for Linux (CI and deployment); on Windows keep using `requirements.txt`.
+
+---
+
 ## Testing
 
-Backend: 293 tests covering the scanner, parser bridge, classifier, resolver,
+Backend: 376 tests covering the scanner, parser bridge, classifier, resolver,
 graph builder (including import-symbol capture and the duplicate-import
 merge behavior), cycle detection, metrics, impact analysis, architecture
 classification (including Django's flat-file conventions), risk scoring,
@@ -529,7 +581,7 @@ cd backend
 python -m pytest tests\ -v
 ```
 
-Frontend: 94 `vitest` tests (jsdom + Testing Library) covering the filter
+Frontend: 103 `vitest` tests (jsdom + Testing Library) covering the filter
 predicates, the dagre layout (isolated-file grid, no overlaps, feedback
 edges), the HomePage analyze-then-navigate flow, the ProjectPage
 fetch-by-URL / not-found / backend-down / copy-link (including clipboard
@@ -546,21 +598,26 @@ browser, not by the automated suite.
 
 With GitHub URL support, a public deployment now makes real sense — anyone
 can paste a public repo URL and get results, without needing anything on
-the server beforehand. (Local-path mode still only works against whatever
-filesystem the backend itself is running on, which is expected: if you
-deploy the backend, "local path" means *that server's* files, not the
-visitor's laptop. GitHub URL mode is what makes a public demo link work for
-anyone else.)
+the server beforehand. Local-path mode is **disabled** on a deployment
+(and by default everywhere): "local path" would mean *that server's* files,
+which no visitor should be able to browse. GitHub URL mode is what makes a
+public demo link work for anyone else.
 
 **Backend** — Render or Railway (confirm current pricing and plan
 requirements yourself). Both support a standard `uvicorn` process. **Attach
 a persistent disk and set `CODEMAP_DB_PATH` (see "Persistence" above) or
 every redeploy deletes all saved projects and shared links.**
-Set the start command to `uvicorn main:app --host 0.0.0.0 --port $PORT`
-from `backend/app/`, and set these environment variables:
+Install with `pip install --require-hashes -r requirements.lock` (exact,
+hash-verified versions; Linux) and `npm ci` in `backend/parser`. Set the start
+command to `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips='*'`
+from `backend/app/` (one worker: SQLite is single-writer and the rate limiter is
+in-memory; the proxy flags make per-client rate limits see real visitors instead
+of your host's proxy — `'*'` is only safe because the app is reachable solely
+through that proxy), and set these environment variables:
+- `CODEMAP_ALLOW_LOCAL_PATHS=false` (the default; never turn it on for a public server), `CODEMAP_DISABLE_DOCS=true`, and `CODEMAP_ALLOWED_HOSTS=<your API hostname>`. Also `CODEMAP_GITHUB_REDIRECT_URI=https://<your-api>/api/auth/github/callback` if offering sign-in, so the OAuth redirect never depends on the incoming Host header.
 - `CODEMAP_DB_PATH` — a path on the persistent disk, e.g. `/var/data/codemap.db`
 - `CODEMAP_ALLOWED_ORIGINS` — your deployed frontend's URL (comma-separated if more than one)
-- `GITHUB_TOKEN` — recommended for a public deployment for *anonymous* visitors; without it, GitHub's 60-requests/hour limit is shared across every unauthenticated visitor hitting your deployed backend from the same server IP. A token (no special scopes needed for public repos) raises that to 5,000/hour. Signed-in visitors use their own token instead (see "GitHub sign-in" above) and aren't affected by this either way.
+- `GITHUB_TOKEN` — use a **fine-grained token limited to public-repo read access, never a classic `repo`-scope token** (the server also refuses private repos when only this shared token is in play, but least privilege is the real protection). Recommended for a public deployment for *anonymous* visitors; without it, GitHub's 60-requests/hour limit is shared across every unauthenticated visitor hitting your deployed backend from the same server IP. A token (no special scopes needed for public repos) raises that to 5,000/hour. Signed-in visitors use their own token instead (see "GitHub sign-in" above) and aren't affected by this either way.
 - `CODEMAP_GITHUB_CLIENT_ID`, `CODEMAP_GITHUB_CLIENT_SECRET`, `CODEMAP_SECRET_KEY`, `CODEMAP_COOKIE_SECURE=true` — only if offering GitHub sign-in; see "GitHub sign-in" above for what each does. `CODEMAP_COOKIE_SECURE=true` specifically is required once frontend and backend are on different domains (the normal case for Vercel + Render), or the session cookie silently never gets sent.
 - `CODEMAP_FRONTEND_URL` — your deployed frontend's URL, so the OAuth callback redirects somewhere real instead of `localhost:5173`.
 - `GEMINI_API_KEY` — only if offering AI tour narration; see "Guided tour" above. Leave unset to offer the tour without narration.
@@ -570,7 +627,9 @@ Make sure Node.js is available in the build environment and that
 
 **Frontend** — Vercel or Netlify. Set the `VITE_API_BASE_URL` build-time
 environment variable to your deployed backend's URL (see
-`frontend/.env.example`).
+`frontend/.env.example`). Security headers (CSP, `X-Frame-Options`, etc.) ship
+in `vercel.json` and `public/_headers`; after deploying, tighten the CSP's
+`connect-src` from `https:` to your exact API origin.
 
 Neither platform choice is load-bearing — any host that runs a persistent
 Python process with a persistent disk (not just serverless functions,

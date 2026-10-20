@@ -43,46 +43,81 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # Third-party actions are pinned to the full commit SHA, not a tag: a tag
+    # (v5) is a moving pointer that whoever controls that repo can re-point at
+    # different code. The comment records which release the SHA was resolved from.
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
       with:
         python-version: '3.12'
 
     - name: Set up Node
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
       with:
         node-version: '20'
 
     - name: Install CodeMap dependencies
       shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
       run: |
-        pip install -r "${{ github.action_path }}/backend/requirements.txt"
-        cd "${{ github.action_path }}/backend/parser" && npm install --no-fund --no-audit
+        # Exact, hash-verified versions only (see backend/requirements.lock), and
+        # `npm ci` (installs exactly package-lock.json) instead of `npm install`.
+        pip install --require-hashes -r "$ACTION_PATH/backend/requirements.lock"
+        cd "$ACTION_PATH/backend/parser" && npm ci --no-fund --no-audit
 
     - name: Run CodeMap analysis
       id: analyze
       shell: bash
+      # SECURITY: inputs are passed as environment variables and only ever
+      # expanded as quoted shell variables below. Writing ${{ inputs.x }}
+      # straight into the script text would let an input containing $(...) or
+      # a quote run arbitrary commands in the job (script injection).
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        WORKSPACE: ${{ github.workspace }}
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_RISK_THRESHOLD: ${{ inputs.risk-threshold }}
+        INPUT_FAIL_ON_NEW_CYCLE: ${{ inputs.fail-on-new-cycle }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
       run: |
-        cd "${{ github.action_path }}/backend/app"
+        cd "$ACTION_PATH/backend/app"
 
-        ARGS=(analyze "${{ github.workspace }}/${{ inputs.path }}" --format markdown --output "${{ github.workspace }}/codemap-result.json")
+        # Resolve a user-supplied relative path and refuse anything that
+        # escapes the checked-out workspace (e.g. "../../etc").
+        inside_workspace() {
+          local resolved
+          resolved="$(realpath -m -- "$WORKSPACE/$1")"
+          case "$resolved" in
+            "$WORKSPACE"|"$WORKSPACE"/*) printf '%s' "$resolved" ;;
+            *) echo "::error::'$1' resolves outside the workspace" >&2; return 1 ;;
+          esac
+        }
 
-        if [ -n "${{ inputs.risk-threshold }}" ]; then
-          ARGS+=(--risk-threshold "${{ inputs.risk-threshold }}")
+        TARGET="$(inside_workspace "${INPUT_PATH:-.}")" || exit 2
+        ARGS=(analyze "$TARGET" --format markdown --output "$WORKSPACE/codemap-result.json")
+
+        if [ -n "$INPUT_RISK_THRESHOLD" ]; then
+          if ! [[ "$INPUT_RISK_THRESHOLD" =~ ^[0-9]{1,3}$ ]] || [ "$INPUT_RISK_THRESHOLD" -gt 100 ]; then
+            echo "::error::risk-threshold must be a whole number from 0 to 100"
+            exit 2
+          fi
+          ARGS+=(--risk-threshold "$INPUT_RISK_THRESHOLD")
         fi
-        if [ "${{ inputs.fail-on-new-cycle }}" = "true" ]; then
+        if [ "$INPUT_FAIL_ON_NEW_CYCLE" = "true" ]; then
           ARGS+=(--fail-on-new-cycle)
         fi
-        if [ -n "${{ inputs.baseline }}" ]; then
-          ARGS+=(--baseline "${{ github.workspace }}/${{ inputs.baseline }}")
+        if [ -n "$INPUT_BASELINE" ]; then
+          BASELINE="$(inside_workspace "$INPUT_BASELINE")" || exit 2
+          ARGS+=(--baseline "$BASELINE")
         fi
 
         set +e
-        python cli.py "${ARGS[@]}" > "${{ github.workspace }}/codemap-comment.md"
+        python cli.py "${ARGS[@]}" > "$WORKSPACE/codemap-comment.md"
         EXIT_CODE=$?
         set -e
 
-        cat "${{ github.workspace }}/codemap-comment.md"
+        cat "$WORKSPACE/codemap-comment.md"
 
         if [ $EXIT_CODE -eq 0 ]; then
           echo "passed=true" >> "$GITHUB_OUTPUT"
@@ -93,23 +128,31 @@ runs:
 
     - name: Comment on pull request
       if: always() && inputs.comment-on-pr == 'true' && github.event_name == 'pull_request'
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
       with:
         script: |
           const fs = require('fs');
           const path = require('path');
           const commentPath = path.join(process.env.GITHUB_WORKSPACE, 'codemap-comment.md');
+          if (!fs.existsSync(commentPath)) return;
           const body = fs.readFileSync(commentPath, 'utf-8');
 
-          // Look for a previous CodeMap comment on this PR and update it in
-          // place, rather than piling up a new comment on every push.
-          const marker = '### CodeMap Analysis';
-          const { data: comments } = await github.rest.issues.listComments({
+          // Update our previous comment in place instead of piling up a new one
+          // per push. Two safeguards: (1) match a hidden marker rather than a
+          // visible heading, and (2) only accept comments written by a Bot - a
+          // PR commenter who types the marker could otherwise make this step
+          // try to edit THEIR comment (and fail) or hijack where we write.
+          // Paginated, since a busy PR has more than the default 30 comments.
+          const marker = '<!-- codemap-analysis -->';
+          const comments = await github.paginate(github.rest.issues.listComments, {
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: context.issue.number,
+            per_page: 100,
           });
-          const existing = comments.find((c) => c.body.includes(marker));
+          const existing = comments.find(
+            (c) => c.user && c.user.type === 'Bot' && c.body && c.body.includes(marker)
+          );
 
           if (existing) {
             await github.rest.issues.updateComment({

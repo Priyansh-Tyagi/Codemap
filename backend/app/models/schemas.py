@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class AnalyzeRequest(BaseModel):
-    path: str | None = Field(None, description="Absolute path to a local JS/TS repository")
-    githubUrl: str | None = Field(None, description="GitHub repository URL, e.g. https://github.com/owner/repo")
+    path: str | None = Field(None, max_length=1024, description="Absolute path to a local JS/TS repository")
+    githubUrl: str | None = Field(None, max_length=300, description="GitHub repository URL, e.g. https://github.com/owner/repo")
     forceRefresh: bool = Field(
         False,
         description="For GitHub sources only: bypass the cache and re-download even if a recent analysis exists.",

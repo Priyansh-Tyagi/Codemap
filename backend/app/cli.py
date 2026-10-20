@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 import networkx as nx
@@ -153,6 +154,41 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0 if passed else 1
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+# Hidden in the comment body so the Action can recognise ITS OWN comment (a
+# visible heading is something any commenter could type to impersonate it).
+COMMENT_MARKER = "<!-- codemap-analysis -->"
+
+
+def _plain(text) -> str:
+    """
+    File paths come from the repository under analysis - in a pull request that
+    means from the PR's author, who may be a stranger. A path can legally hold
+    a newline or other control characters, which in CI logs could start a fake
+    `::workflow-command::` line and in a markdown comment could start new
+    markup. Strip them everywhere a path is printed.
+    """
+    return " ".join(_CONTROL.sub(" ", str(text)).split())
+
+
+def _md_code(text, table_cell: bool = False) -> str:
+    """
+    A markdown inline-code span that cannot be broken out of: the fence is
+    longer than any backtick run inside the text (CommonMark's rule), and
+    pipes are escaped when the span sits in a table. Code spans also keep
+    `@mentions` and links inert, so a file named "@everyone" or "[x](http://..)"
+    cannot ping people or inject links into the comment.
+    """
+    text = _plain(text)
+    if table_cell:
+        text = text.replace("|", "\\|")
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
 def _print_json_report(serialized, new_cycles, high_risk_files, passed) -> None:
     print(
         json.dumps(
@@ -182,7 +218,7 @@ def _print_text_report(serialized, new_cycles, high_risk_files, passed, args) ->
         if new_cycles:
             print(f"NEW circular dependencies introduced ({len(new_cycles)}):")
             for cycle in new_cycles:
-                print(f"  - {' <-> '.join(sorted(cycle))}")
+                print(f"  - {' <-> '.join(_plain(c) for c in sorted(cycle))}")
         else:
             print("No new circular dependencies.")
         print()
@@ -191,7 +227,7 @@ def _print_text_report(serialized, new_cycles, high_risk_files, passed, args) ->
         if high_risk_files:
             print(f"Files at or above risk threshold {args.risk_threshold}:")
             for node_id, score in high_risk_files:
-                print(f"  - {node_id}: {score}/100")
+                print(f"  - {_plain(node_id)}: {score}/100")
         else:
             print(f"No files at or above risk threshold {args.risk_threshold}.")
         print()
@@ -201,6 +237,7 @@ def _print_text_report(serialized, new_cycles, high_risk_files, passed, args) ->
 
 def _print_markdown_report(serialized, new_cycles, high_risk_files, passed, args) -> None:
     lines = [
+        COMMENT_MARKER,
         "### CodeMap Analysis",
         "",
         f"**{serialized['fileCount']} files &middot; {serialized['edgeCount']} dependencies "
@@ -212,7 +249,7 @@ def _print_markdown_report(serialized, new_cycles, high_risk_files, passed, args
         if new_cycles:
             lines.append(f"#### New circular dependency introduced ({len(new_cycles)})")
             for cycle in new_cycles:
-                lines.append(f"- `{'` &harr; `'.join(sorted(cycle))}`")
+                lines.append("- " + " &harr; ".join(_md_code(c) for c in sorted(cycle)))
         else:
             lines.append("No new circular dependencies.")
         lines.append("")
@@ -223,7 +260,7 @@ def _print_markdown_report(serialized, new_cycles, high_risk_files, passed, args
             lines.append("| File | Risk |")
             lines.append("|---|---|")
             for node_id, score in high_risk_files:
-                lines.append(f"| `{node_id}` | {score} |")
+                lines.append(f"| {_md_code(node_id, table_cell=True)} | {score} |")
         else:
             lines.append(f"No files at or above risk threshold {args.risk_threshold}.")
         lines.append("")

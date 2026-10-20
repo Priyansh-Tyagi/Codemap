@@ -8,19 +8,45 @@ services:
     runtime: python
     plan: starter
     rootDir: backend
-    buildCommand: pip install -r requirements.txt && cd parser && npm install
-    startCommand: cd app && uvicorn main:app --host 0.0.0.0 --port $PORT
+    # requirements.lock = exact versions + hashes, so only reviewed artifacts install;
+    # `npm ci` installs exactly package-lock.json (plain `npm install` can drift).
+    buildCommand: pip install --require-hashes -r requirements.lock && cd parser && npm ci
+    # --workers 1: SQLite is single-writer and the rate limiter is in-memory.
+    # --proxy-headers/--forwarded-allow-ips: behind Render's proxy every request
+    # arrives from the proxy's address; without this the per-client rate limits
+    # would treat ALL visitors as one client. '*' is acceptable here only because
+    # the service is reachable solely through Render's proxy - on a host where the
+    # port is directly exposed, list the proxy's address instead.
+    startCommand: cd app && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips='*'
     disk:
       name: codemap-data
       mountPath: /var/data
       sizeGB: 1
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8   # the version the lockfile and test suite were verified on
+      # Never expose "analyze a folder on the server" publicly: it would let any
+      # visitor map the server's own filesystem. Off is also the default; stated
+      # here so nobody has to wonder.
+      - key: CODEMAP_ALLOW_LOCAL_PATHS
+        value: "false"
+      - key: CODEMAP_DISABLE_DOCS
+        value: "true"   # hides /docs, /redoc and /openapi.json
+      - key: CODEMAP_ALLOWED_HOSTS
+        sync: false     # set to your API hostname, e.g. codemap-api.onrender.com
+      - key: CODEMAP_GITHUB_REDIRECT_URI
+        sync: false     # only if offering sign-in: https://<your-api>/api/auth/github/callback
       - key: CODEMAP_DB_PATH
         value: /var/data/codemap.db
       - key: CODEMAP_ALLOWED_ORIGINS
         sync: false   # set to your deployed frontend URL
       - key: GITHUB_TOKEN
-        sync: false   # optional but recommended for anonymous visitors (raises 60/hr -> 5,000/hr)
+        # Optional (raises anonymous visitors' limit 60/hr -> 5,000/hr), but treat it as
+        # PUBLIC data only: use a fine-grained token with read access to public repos and
+        # NOTHING else, never a classic token with the `repo` scope. Private repos are also
+        # refused in code when only this shared token is in play, but least privilege is the
+        # real protection.
+        sync: false
       - key: CODEMAP_FRONTEND_URL
         sync: false   # only if offering GitHub sign-in - your deployed frontend's URL
       - key: CODEMAP_GITHUB_CLIENT_ID
