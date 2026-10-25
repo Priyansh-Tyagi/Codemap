@@ -7,7 +7,7 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 **Live demo:** https://codemap-gold.vercel.app/  
 *The backend runs on a free tier that sleeps when idle, so the first request after a quiet period can take about a minute to wake. After that it is fast.*
 
-CodeMap home page ![alt text](image.png)
+#CodeMap home page ![alt text](image.png)
 
 ---
 
