@@ -1,18 +1,35 @@
 # Keeps pinned dependencies from silently going stale. Pinning (exact versions,
 # hashes, commit SHAs) is what makes installs reproducible and tamper-resistant;
-# Dependabot is what keeps that from turning into running year-old code. Each
-# update arrives as a normal PR, so it still goes through CI and review.
+# Dependabot is what keeps that from turning into running year-old code.
+#
+# Each update arrives as a normal PR, and .github/workflows/tests.yml runs the
+# backend and frontend suites on it, so there is a real pass/fail signal.
+# Related updates are grouped so one week produces a few PRs, not sixteen.
+#
+# Python caveat: Dependabot edits backend/requirements.txt (minimum versions).
+# Production installs the hash-locked backend/requirements.lock, which Dependabot
+# cannot regenerate. Refresh the lock deliberately (pip-compile --generate-hashes
+# on Linux), then run the suite.
 version: 2
 updates:
   - package-ecosystem: github-actions   # also rewrites the SHA pins (and their "# v5" comments)
     directory: "/"
     schedule: { interval: weekly }
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: pip
     directory: "/backend"
     schedule: { interval: weekly }
   - package-ecosystem: npm
     directory: "/frontend"
     schedule: { interval: weekly }
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
   - package-ecosystem: npm
     directory: "/backend/parser"
     schedule: { interval: weekly }
+    groups:
+      babel:                 # @babel/parser and @babel/traverse must move together
+        patterns: ["@babel/*"]
