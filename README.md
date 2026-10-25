@@ -29,11 +29,11 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 
 | | |
 |---|---|
-| Focus mode on a large project ![alt text](image-1.png) | File details and change impact ![alt text](image-2.png) |
+| Focus mode on a large project ![alt text](screenshots/image-1.png) | File details and change impact ![alt text](screenshots/image-2.png) |
 | **Focus mode** on the FastAPI full-stack template: 5 of 152 files | **Risk score and change impact** for a selected file |
-| Circular dependency ![alt text](image-3.png) | Guided tour ![alt text](image-4.png) |
+| Circular dependency ![alt text](screenshots/image-3.png) | Guided tour ![alt text](screenshots/image-4.png) |
 | **A circular dependency**, with the cycle-closing edge drawn distinctly | **Guided tour**: a deterministic reading order |
-| Light theme ![alt text](image-5.png) | Project overview [alt text](image-6.png) |
+| Light theme ![alt text](screenshots/image-5.png) | Project overview [alt text](screenshots/image-6.png) |
 | **Light theme** (dark is the default on dark-mode systems) | **Project stats** and architecture breakdown |
 
 ---
