@@ -1,674 +1,296 @@
 # CodeMap
 
-**Interactive Codebase Intelligence & Dependency Analyzer**
+**See how a codebase fits together before you change it.**
 
-CodeMap points at a local JavaScript/TypeScript repository and gives you an
-interactive dependency graph, circular-dependency detection, change-impact
-analysis, and a deterministic risk score per file — all from real static
-analysis, not guesswork.
+CodeMap maps every import in a JavaScript, TypeScript or Python repository into an interactive dependency graph. It finds circular dependencies, shows what a change could break, scores each file's risk from the graph itself, and walks you through an unfamiliar repo in a sensible reading order. Paste a public GitHub URL (or sign in to analyze your own private repos) and get results in seconds. It also runs as a CLI and a GitHub Action that fails a pull request when it introduces a new cycle.
 
-> Give CodeMap a repository and understand its architecture, dependencies,
-> and change impact in seconds.
+**Live demo:** https://codemap-gold.vercel.app/  
+*The backend runs on a free tier that sleeps when idle, so the first request after a quiet period can take about a minute to wake. After that it is fast.*
 
----
-
-## Design
-
-The interface is neutral and **colour is reserved for data**: the only saturated hues on screen are the architecture categories (each with its own glyph, so it's never colour alone), risk flags, and circular-dependency red. Everything else - panels, buttons, text - is a neutral scale, and the primary action is ink rather than an accent colour that would compete with the data.
-
-- **Two themes, light and dark.** Defaults to your OS setting, with a toggle in the header; the choice is remembered. Both are defined as CSS variables in `frontend/src/index.css` (`:root[data-theme=...]`); components only use semantic names (`bg-surface`, `text-muted`, `border-line`), never raw colours, so a third theme is one more block of variables. The theme is set by a small inline script in `index.html` before first paint, so there's no flash.
-- **Type:** Geist for the interface, Geist Mono only for file paths and code.
-- **Canvas:** dot-grid stage, node cards with a glyph chip, visible ports, floating panels. The home page's hero is the product's own output (a small dependency map, including a circular dependency) that draws itself once on load, and respects `prefers-reduced-motion`.
-- **Layout:** the project view is desktop-first (three panels). The home page is responsive down to phone width; the project view on a phone is not yet optimised.
-
-## Screenshots
-
-*(Add your own screenshots here once you've run CodeMap locally — see
-"Capturing screenshots" below for exactly which five to take.)*
-
-1. Full dependency graph
-2. File details panel
-3. Change-impact analysis
-4. Circular dependency highlighted
-5. Project stats / architecture breakdown
+![CodeMap home page](![alt text](image.png))
 
 ---
 
-## Features
+## What it does
 
-- **Repository scanning** — recursively finds `.js`/`.jsx`/`.ts`/`.tsx`/`.py` files, skipping `node_modules`, `dist`, `build`, `__pycache__`, and similar directories at the directory-walk level (never even descends into them).
-- **JavaScript/TypeScript and Python support** — both languages are parsed, resolved, and graphed through entirely separate pipelines (Python's import system genuinely isn't "JS with different syntax": relative-import "level," dotted absolute paths, and no free syntactic marker for local-vs-external the way JS's `./` prefix gives you one) and merged into a single graph. A `.py` file and a `.js` file with the same base name can never accidentally link to each other — proven with a dedicated test, not just asserted. Python parsing uses the stdlib `ast` module directly, no subprocess needed.
-- **Filter and focus** — narrow the graph and file tree by architecture category, minimum risk level, or folder (including subtree scoping); filtered-out nodes are removed from layout entirely rather than just dimmed, so a large repo actually declutters instead of just fading.
-- **GitHub Actions CI check** — the same analysis engine, wrapped as a CLI and a composite GitHub Action (`action.yml`), that gates a pull request on newly-introduced circular dependencies or files crossing a risk threshold, posting the result as a PR comment. See "CI/CD integration" below.
-- **Local or GitHub URL input** — analyze a directory on your own machine, or paste a public GitHub repo URL (`https://github.com/owner/repo`, optionally `/tree/branch`) and CodeMap downloads a one-shot tarball snapshot, analyzes it, and cleans up the temp files automatically. No `git clone`, no commit history fetched.
-- **Sign in with GitHub** — OAuth sign-in gets you your own 5,000/hour GitHub API rate limit (instead of sharing the server's) and the ability to analyze your own private repositories. Entirely optional: every feature above works fully anonymously. See "GitHub sign-in" below.
-- **Focus mode** — a 150-file graph drawn all at once is an unreadable column of tiny boxes, and dimming doesn't fix that (dimmed nodes still take layout space). Focus mode draws only the selected file and the files within 1–3 import-steps of it (either direction), composes with the category/risk/folder filters, and re-fits the view on every change. Projects over 60 files open focused on the guided tour's first entry point (deterministic, no AI; falls back to a local heuristic that skips test files). On the FastAPI template that is 5 files instead of 152. The file tree still lists everything, so any file is one click from re-centering.
-- **Path-alias resolution** — `@/lib/utils`-style imports (tsconfig `paths`/`baseUrl`/`extends`, Vite `resolve.alias`, `@/` → `src/`) become real graph edges instead of being miscounted as npm packages. Resolved per package so monorepos work, never cached across runs, and the GitHub extractor keeps the config files so URL analyses get the same result. Measured on real repos: the FastAPI full-stack template went from 162 to 365 edges (0 lost, isolated files 55 → 19); shadcn's Taxonomy went from a completely disconnected graph (0 edges) to 259.
-- **GitHub result caching** — a repeat analysis of the same repo+ref within 10 minutes is served instantly from memory, skipping both the download and the re-parse entirely (a "Force refresh" checkbox bypasses this when you want fresh data sooner). Local paths are never cached — caching your own actively-edited files would risk silently showing stale results.
-- **AST-based import extraction** — uses Babel (`@babel/parser` + `@babel/traverse`) via a small Node subprocess, so JSX and TypeScript syntax are understood natively rather than approximated with regex.
-- **Local dependency resolution** — resolves relative imports to real files on disk, handling extension guessing and `index` files, with a project-root containment check so a crafted import can't resolve outside the analyzed directory.
-- **Interactive dependency graph** — rendered with React Flow, laid out with `dagre` (not naive column-stacking), colored by architecture category, with click-to-highlight for a node's direct dependencies/dependents.
-- **Circular dependency detection** — finds every cycle via `networkx.simple_cycles`, and renders the cycle-closing edge as a distinct curved line rather than letting a standard layout algorithm mis-route it.
-- **Change-impact analysis** — reverse-graph traversal answering "what breaks if I change this file," split into direct and indirect dependents.
-- **Deterministic risk scoring** — a transparent 0–100 score per file (dependents + centrality + complexity + cycle membership), with human-readable reasons, not a black box.
-- **Architecture classification** — heuristic path-based categorization (Component, Service, Controller, Model, Util, Hook, Route, etc. for JS; plus Django/Flask-flavored categories for Python — Serializer, Migration, Command, Admin — including filename-exact rules like `views.py`/`models.py`/`urls.py` so Django's common flat per-app layout, with no subfolders at all, is still classified correctly).
-- **File tree + search** — browse by folder, or search to jump straight to a file and focus the graph on it.
-- **Guided tour** — a suggested reading order through the codebase, top-down from the entry points (`main → App → Dashboard → components`) or bottom-up from the core, computed entirely from graph structure with zero AI. An optional "Narrate with AI" button adds a one-sentence explanation per stop; if that fails or isn't configured, the tour still works exactly as before. See "Guided tour" below.
+- **Dependency graph** for JS/JSX/TS/TSX and Python, merged into one NetworkX graph. Babel parses JS/TS (in a Node subprocess); Python uses the stdlib `ast`. The two languages go through separate resolvers, and a `.py` and a `.js` file that share a base name can never link (tested).
+- **Circular-dependency detection** with the cycle-closing edge drawn distinctly. Cycle *membership* is exact (strongly connected components); listed cycles are capped at 200, shortest first, so a tangled repo stays readable.
+- **Change-impact analysis**: what breaks if I touch this file, split into direct and indirect dependents.
+- **Deterministic 0-100 risk score** per file (dependents, centrality, complexity, cycle membership) with plain-language reasons. No black box and no AI.
+- **Focus mode**: a 150-file graph drawn at once is unreadable, and dimming doesn't help because dimmed nodes still take layout space. Focus mode draws only the selected file and the files 1-3 import-steps away, composes with the filters, and opens large projects already focused on the guided tour's first entry point. On the FastAPI full-stack template that is **5 files instead of 152**.
+- **Guided tour**: a reading order computed from graph structure (top-down from entry points, or core-first). An optional "Narrate with AI" button adds a one-line explanation per stop and always falls back to the deterministic tour.
+- **Path-alias resolution**: `@/lib/utils`-style imports (tsconfig `paths`/`baseUrl`/`extends`, Vite `resolve.alias`) become real edges instead of being miscounted as npm packages. Config files are read, never executed. On the FastAPI template this took the graph from 162 to 365 edges; on shadcn's Taxonomy from 0 to 259.
+- **Architecture classification** (Component, Service, Route, Test, Util, Hook, plus Django/Flask conventions) and filtering by category, risk level or folder.
+- **Shareable permanent links** (`/p/<id>`) backed by SQLite. Private-repo projects are visible only to the session that created them (a 404, never a 403, so existence isn't leaked).
+- **Sign in with GitHub** (optional): your own 5,000/hour API quota and access to your private repos.
+- **Light and dark themes**, file tree with search, imports/symbols panel.
 
-## What CodeMap intentionally does NOT do
+### Screenshots
 
-Documented limitations, not oversights:
-
-- Path aliases are resolved **statically** (config files are read, never executed): tsconfig/jsconfig `paths` + `baseUrl` (with `extends`), `resolve.alias` in `vite.config.*`, and `@/` → nearest `src/`. Not supported: aliases defined in webpack/Babel/Next configs that aren't mirrored in a tsconfig, aliases computed at runtime, `package.json` `exports`/`imports` maps, and `extends` of packages in `node_modules`. An alias to a build-generated folder that isn't in the repo (e.g. contentlayer's `.contentlayer/generated`) is reported as unresolved, which is accurate until you build.
-- Python resolution does not distinguish regular packages (with `__init__.py`) from implicit namespace packages (PEP 420) — any directory is treated as a valid package. Does not support a `src/`-layout Python project where the real package root is nested below the directory you point CodeMap at.
-- No re-export detection for Python (JS's `export { x } from "./y"` has a direct concept; Python's equivalent — importing something into `__init__.py` specifically so other code can import it from the package rather than the submodule — is a convention, not syntax, and isn't specially detected).
-- No support for other non-JS/TS/Python languages.
-- No git history analysis, and GitHub analysis is a snapshot at one ref (branch/commit), not a clone — no commit history is fetched or available.
-- GitHub repos over 200MB are rejected before download (configurable in `analyzer/github_fetcher.py`).
-- Unauthenticated GitHub API requests are capped at 60/hour per IP by GitHub itself — easy to hit on a shared or cloud IP (this was hit live while building the feature). Set a `GITHUB_TOKEN` environment variable (a plain personal access token, no special scopes needed for public repos) to raise that to 5,000/hour.
-- Projects are stored in a single SQLite file with no expiry or eviction — it grows with every analysis (roughly a few MB for a 100-file repo) and is never pruned. Fine for a personal tool or a demo; a public deployment would need a retention policy. SQLite also assumes one server process (see Persistence below).
-- Listed circular dependencies are capped at 200 (shortest first) with a "200+" indicator; whether a file is *in* a cycle is always exact. See "Scaling behavior" below.
-- Betweenness centrality is skipped above 1500 files in a single repo (returned as `null`) to avoid an expensive computation on very large codebases; degree centrality is always computed.
-
----
-
-## Tech stack
-
-| Layer | Choice |
+| | |
 |---|---|
-| Frontend | React + Vite + Tailwind CSS v4 + React Flow + dagre + Axios + lucide-react (icons) |
-| Backend | Python + FastAPI |
-| Parsing | JS/TS: Node.js + `@babel/parser`/`@babel/traverse`, invoked as a one-shot subprocess. Python: stdlib `ast` module, called directly (no subprocess). |
-| Graph analysis | NetworkX |
-| Storage | SQLite (stdlib `sqlite3`, no ORM) — persistent, shareable project links |
-| Auth | GitHub OAuth (classic OAuth App, authorization-code flow), opaque session cookie, `cryptography` (Fernet) for tokens at rest |
+| ![Focus mode on a large project](![alt text](image-1.png)) | ![File details and change impact](![alt text](image-2.png)) |
+| **Focus mode** on the FastAPI full-stack template: 5 of 152 files | **Risk score and change impact** for a selected file |
+| ![Circular dependency](![alt text](image-3.png)) | ![Guided tour](![alt text](image-4.png)) |
+| **A circular dependency**, with the cycle-closing edge drawn distinctly | **Guided tour**: a deterministic reading order |
+| ![Light theme](![alt text](image-5.png)) | ![Project overview](![alt text](image-6.png)) |
+| **Light theme** (dark is the default on dark-mode systems) | **Project stats** and architecture breakdown |
+
+---
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    UI["React + Vite + React Flow<br/>graph, file tree, impact, tour"] -->|REST| API["FastAPI"]
+    API --> Fetch["GitHub fetcher<br/>tarball, size caps, tar-slip guard"]
+    API --> Engine
+    subgraph Engine["Analysis engine (Python)"]
+        Scan["File scanner<br/>ignore rules, symlinks skipped"]
+        JS["JS/TS: Babel via Node subprocess<br/>scrubbed env, heap cap"]
+        PY["Python: stdlib ast"]
+        Res["Resolvers<br/>relative imports, aliases, import roots"]
+        Scan --> JS --> Res
+        Scan --> PY --> Res
+    end
+    Res --> Graph["NetworkX graph<br/>cycles, centrality, impact, risk"]
+    Graph --> Store[("SQLite<br/>projects, sessions, caches")]
 ```
-React (Vite) — Graph View / File Tree / Details / Impact / Metrics
-        │  REST (Axios)
-        ▼
-FastAPI — /api/analyze, /projects, /files, /impact, /cycles, /metrics
-        │
-        ▼
-Analysis Engine (Python)
-  ├─ File Scanner (os.walk + ignore rules)
-  ├─ JS/TS pipeline: Parser Bridge → subprocess → Node/Babel AST → imports JSON
-  │    ├─ Import Classifier (local vs external)
-  │    └─ Path Resolver (extension/index resolution)
-  ├─ Python pipeline: stdlib `ast` → imports (no subprocess)
-  │    └─ Python Resolver (dotted-path + relative-level resolution;
-  │         classification and resolution are the same step here, unlike JS)
-  ├─ Architecture Classifier (path-based heuristic, JS + Django/Flask conventions)
-  └─ Risk Scorer (dependents + centrality + complexity + cycles)
-        │
-        ▼
-Graph Engine (NetworkX) — ONE graph merging both languages' output
-  ├─ Cycle detection
-  ├─ Centrality (degree always, betweenness if ≤1500 nodes)
-  ├─ Dependency depth (cycle-safe DFS)
-  └─ Impact analysis (reverse-graph BFS)
-```
+
+**Design decisions worth knowing**
+
+- **SQLite, not Postgres.** One process and almost no concurrent writes; each project is one row of JSON. Storage sits behind a small functional interface (`services/store.py`), so the swap from an in-memory dict to SQLite changed zero API routes.
+- **GitHub OAuth, not username/password.** It buys the two things users actually want (private repos and their own rate limit) with no password storage.
+- **No caching of local-path analyses or alias configs.** A silently stale result is a correctness bug, not a missed optimization. GitHub results *are* cached (a ref is a stable target).
+- **The AI layer is strictly optional.** The deterministic tour never imports it; narration is opt-in, cached per project, rate-limited, and sends only graph structure (paths, categories, counts), never file contents.
+- **Secure by default.** Dangerous features are opt-in, and the example config ships them commented out.
 
 ---
 
-## Setup (Windows)
+## Quick start (Windows, cmd.exe)
 
-### 1. Backend
+You need Python 3.12 and Node.js.
 
-```powershell
+**Backend**
+```bat
 cd backend\parser
-npm install
+npm ci
 
 cd ..
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-```
 
-Run the test suite:
-```powershell
-python -m pytest tests\ -v
-```
-
-Start the API:
-```powershell
 cd app
 python -m uvicorn main:app --reload --port 8000
 ```
 
-**Analyzing a folder on your own machine ("Local path") is off by default.** It lets whoever can reach the API read your filesystem's structure, which is only acceptable when that's just you. To enable it for local development, copy `backend\app\.env.example` to `backend\app\.env` and uncomment `CODEMAP_ALLOW_LOCAL_PATHS=true`. Without it, the UI simply offers GitHub URLs. (See "Security" below for why.)
-
-### 2. Frontend
-
-In a second terminal:
-```powershell
+**Frontend** (second terminal)
+```bat
 cd frontend
 npm install
 npm run dev
 ```
+Open `http://localhost:5173` and paste a public GitHub URL.
 
-Open the printed URL (normally `http://localhost:5173`).
+**Analyzing a folder on your machine is off by default**, because it would let anyone who can reach the API read your server's filesystem structure. For local development, copy `backend\app\.env.example` to `backend\app\.env` and uncomment `CODEMAP_ALLOW_LOCAL_PATHS=true`.
 
-### 3. Try it
+**Optional features** (all configured in `backend\app\.env`; each is commented in `.env.example`): GitHub sign-in (register an OAuth App with callback `http://localhost:8000/api/auth/github/callback`), a `GITHUB_TOKEN` to raise the anonymous 60/hour GitHub limit, and `GEMINI_API_KEY` for AI narration.
 
-Choose "Local path" or "GitHub URL" using the toggle next to the input box.
-
-For a local path, the bundled demo repo is a good first try:
-```
-C:\path\to\codemap\examples\demo-repo
-```
-(Use forward slashes or the path as shown above; a raw Windows backslash
-path can occasionally be misread as a JSON escape sequence when typed into
-the browser input.)
-
-For a GitHub URL, paste any public repo, e.g.:
-```
-https://github.com/owner/repo
-```
-Note: unauthenticated GitHub API requests are capped at 60/hour per IP —
-see "What CodeMap intentionally does NOT do" below if you hit that limit.
-Signing in with GitHub (optional - see "GitHub sign-in" below) raises this
-to your own 5,000/hour and lets you analyze your own private repos.
+### Try the bundled demo repos
+`examples/demo-repo` (JS) and `examples/demo-repo-python` are small apps built to exercise every feature, including one deliberate cycle (`authService -> userService -> authService`). Measured output: the JS demo has 15 files, 23 edges and 1 cycle; the Python twin has 18 files, 19 edges and 1 cycle.
 
 ---
 
-## The demo repo
+## CI: the CLI and the GitHub Action
 
-`examples/demo-repo` is a small, deliberately-constructed app (not a real
-product) built to exercise every CodeMap feature at once: multiple
-architecture categories, a genuine circular dependency, and one
-heavily-depended-on utility file. Actual output from analyzing it:
-
-- **15 files, 23 dependency edges, 1 circular dependency, 1 connected component**
-- **Cycle:** `authService.js → userService.js → authService.js` (a realistic pattern — auth needs to look up users, user registration needs to issue tokens)
-- **Highest risk file:** `userService.js` (Medium, 44/100) — three dependents, involved in the cycle, moderate centrality
-- **Categories represented:** Route, Controller, Service, Model, Component, Hook, Util, and one uncategorized entry point (`app.js`)
-
-These numbers came from actually running CodeMap against the repo, not
-estimates — rerun it yourself and you should see the same results (this
-demo repo can also serve as a quick regression check that nothing broke).
-
-## The Python demo repo
-
-`examples/demo-repo-python` is the Python twin of `demo-repo` above — the
-same route/controller/service/model layering, the same deliberate cycle
-pattern, the same over-relied-on validators file, rebuilt in Python
-specifically so the two demo repos give a genuine apples-to-apples
-comparison of CodeMap analyzing the same application shape in two
-languages. Actual output from analyzing it:
-
-- **18 files, 19 dependency edges, 1 circular dependency**
-- **Cycle:** `auth_service.py → user_service.py → auth_service.py` (same realistic pattern as the JS version — auth needs to look up users, user registration needs to issue tokens)
-- **Highest risk file:** `user_service.py` (Medium, 41/100)
-- **Categories represented:** Route, Controller, Service, Model, Util — using the Django/Flask-flavored classification rules, not the JS ones
-- **One genuine external dependency detected:** `datetime` (stdlib, from `utils/formatting.py`) — correctly distinguished from the project's own local modules
-
-## CI/CD integration
-
-CodeMap's analysis engine is also available as a CLI (`backend/app/cli.py`)
-and wrapped as a composite GitHub Action (`action.yml` at the repo root),
-so a PR can be gated on dependency-graph regressions, not just reviewed
-manually.
-
-### CLI usage
-
-Run from `backend/app/` (same convention as `uvicorn main:app`):
+The same engine runs headless. Run from `backend/app/`:
 
 ```bash
-# Human-readable summary, no gating
-python cli.py analyze ../../examples/demo-repo
-
-# Fail (exit 1) if any file's risk score is 80 or above
-python cli.py analyze ../../examples/demo-repo --risk-threshold 80
-
-# Write a baseline snapshot (typically generated from your main branch)
-python cli.py analyze ../../examples/demo-repo --output baseline.json
-
-# Compare against that baseline, failing ONLY on a genuinely new cycle -
-# pre-existing circular dependencies don't block every future PR
-python cli.py analyze ../../examples/demo-repo --baseline baseline.json --fail-on-new-cycle
-
-# Machine-readable output for scripting, or PR-comment-ready markdown
-python cli.py analyze ../../examples/demo-repo --format json
-python cli.py analyze ../../examples/demo-repo --format markdown
+python cli.py analyze ../../examples/demo-repo                          # summary
+python cli.py analyze <path> --risk-threshold 80                        # exit 1 if any file scores >= 80
+python cli.py analyze <path> --output baseline.json                     # snapshot (from your main branch)
+python cli.py analyze <path> --baseline baseline.json --fail-on-new-cycle   # fail ONLY on a new cycle
+python cli.py analyze <path> --format json|markdown
 ```
-
-Exit codes: `0` = passed, `1` = failed a gating check, `2` = couldn't
-analyze the path at all (bad argument, not an analysis result).
-
-### Using the Action in a workflow
+Exit codes: `0` passed, `1` failed a gating check, `2` could not analyze the path.
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: <owner>/codemap@main   # or a local path via "uses: ./" within this repo
+- uses: <owner>/codemap@main
   with:
     path: src
     risk-threshold: '80'
     fail-on-new-cycle: 'true'
     baseline: codemap-baseline.json
 ```
-
-`.github/workflows/codemap-ci.yml` in this repo is a working, self-contained
-example: it runs the Action against `examples/demo-repo`, comparing against
-`examples/demo-repo-baseline.json` (generated the same way you'd generate
-one for a real project — run the CLI with `--output` against your default
-branch and commit the result).
-
-### What I could and couldn't verify from here
-
-Being direct about this rather than implying more confidence than is
-warranted: I fully tested the CLI itself (11 automated tests, all running
-the actual command as a subprocess — exit codes, baseline diffing, a
-genuinely-introduced new cycle correctly detected without false-flagging
-a pre-existing baselined one) and validated `action.yml`'s YAML structure
-and the exact shell logic each step runs. What I *couldn't* test from this
-sandbox is the parts that only exist inside a real GitHub Actions runner —
-the PR-comment-posting step (`actions/github-script`) needs a live GitHub
-API token and an actual pull request to post to. Push this to a real
-GitHub repo, open a PR that touches `examples/demo-repo/`, and that's the
-piece to watch for the first time.
-
-## Capturing screenshots
-
-I can't capture browser screenshots directly, but here's exactly what to
-grab once the app's running against `examples/demo-repo`:
-
-1. **Full graph** — after analyzing, before clicking anything, fit-to-view.
-2. **File details** — click `userService.js`, showing its Medium risk badge and reasons.
-3. **Impact analysis** — with `userService.js` still selected, screenshot the "Change impact" panel showing its dependents.
-4. **Circular dependency** — zoom into the `authService.js`/`userService.js` pair showing the curved dashed cycle-closing edge.
-5. **Project stats** — the right-hand "Project" panel showing file/dependency/cycle counts.
+Baseline diffing means existing cycles don't block every future PR, only newly introduced ones. Action inputs are passed through `env:` and validated; no `${{ }}` expression appears inside a script body (the original version was injectable; see Security).
 
 ---
 
-## API reference
+## API
 
-FastAPI auto-generates interactive docs once the backend is running:
-`http://localhost:8000/docs` (disabled when `CODEMAP_DISABLE_DOCS=true`, as in `render.yaml`).
+Interactive docs are at `/docs` locally (disabled in production via `CODEMAP_DISABLE_DOCS`).
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/config` | Non-secret server capabilities the UI adapts to (e.g. `allowLocalPaths`) |
-| POST | `/api/analyze` | `{ path }` (only if the server enables it) or `{ githubUrl }` → runs the full pipeline, returns a `projectId`. Rate-limited per client; cache hits are free |
-| GET | `/api/projects/{id}` | Project summary stats |
-| GET | `/api/projects/{id}/graph` | Full node + edge list |
-| GET | `/api/projects/{id}/files` | Lightweight file list |
-| GET | `/api/projects/{id}/files/{path}` | Single file detail |
-| GET | `/api/projects/{id}/files/{path}/dependencies` | Direct outgoing deps |
-| GET | `/api/projects/{id}/files/{path}/dependents` | Direct incoming deps |
-| GET | `/api/projects/{id}/files/{path}/impact` | Change-impact analysis |
-| GET | `/api/projects/{id}/cycles` | All detected cycles |
-| GET | `/api/projects/{id}/metrics` | Aggregate project metrics |
-| GET | `/api/projects/{id}/tour?mode=trace\|foundation` | Deterministic guided tour (no AI) |
-| POST | `/api/projects/{id}/tour/narrate?mode=...` | Opt-in AI narration of the tour, cached per project and mode |
-| GET | `/api/auth/github/login` | Redirects to GitHub's OAuth consent screen |
-| GET | `/api/auth/github/callback` | OAuth callback; creates a session, redirects to the frontend |
-| GET | `/api/auth/me` | `{ user: { login, avatarUrl } \| null }` for the current session |
-| POST | `/api/auth/logout` | Clears the current session |
-
-Every `/api/projects/{id}...` route above is also where private-repo access control lives (see "GitHub sign-in" below) — a private project 404s for anyone but the session that created it.
-
----
-
-## Persistence and shareable links
-
-Every analysis is saved to a SQLite file and gets a permanent URL, `/p/<projectId>`. Open that URL in any browser and the full interactive view loads from the stored analysis — no re-analysis, nothing to type. The "Copy link" button in the project header copies it.
-
-- **Where the file lives:** `CODEMAP_DB_PATH` if set; otherwise `backend/app/codemap.db`, anchored to that directory regardless of where you launch `uvicorn` from. (Earlier this defaulted to `./codemap.db` relative to the process's working directory - starting the server from a slightly different directory between sessions, e.g. a new terminal or an IDE run config, silently created a second, empty database, which looked exactly like "persistence doesn't work." Fixed; see `backend/tests/test_db_path_default.py`.) Tables are created lazily on first use, never at import time. You do not need to set `CODEMAP_DB_PATH` yourself for local development - it's only there for deployment, where you point it at a persistent disk (see below).
-- **Why SQLite, not Postgres:** one process, almost no concurrent writes, and each project is one row of JSON. The tool that fits is the simpler one.
-- **What is (and isn't) cached:** GitHub analyses are cached for 10 minutes per repo+ref (persisted, so the cache also survives restarts). Local paths are never cached — caching a folder you're actively editing would silently show stale results.
-- **Schema changes migrate existing databases.** `CREATE TABLE IF NOT EXISTS` never alters a table that already exists, so columns added in later phases (`is_private`, `owner_session_id`, `cycle_info_json`) are added with `ALTER TABLE` on startup if missing (`_migrate` in `services/store.py`). Without this, an older `codemap.db` failed every analysis with `table projects has no column named is_private` - found when it hit a real pre-existing database, and invisible to the test suite because every other test starts from an empty one. `tests/test_db_migration.py` starts from a genuine old-format database instead, and was verified to fail with the migration disabled. Existing projects and shared links are preserved. Adding a column in future means updating both `_SCHEMA` and `_PROJECT_COLUMN_MIGRATIONS`.
-- **Proof it persists:** `backend/tests/test_persistence.py` runs real separate Python processes that share only the DB file, and importing the store is tested to not create a database file as a side effect.
-
-### Deployment caveat: ephemeral disks
-
-Most hosts (Render, Railway, Fly) give a web service a filesystem that is **wiped on every redeploy**. With the default DB path, every redeploy silently deletes every stored project — and every link you've shared then shows "Project not found."
-
-Fix: attach a persistent disk/volume and point `CODEMAP_DB_PATH` at it. A Render blueprint is included as `render.yaml` (disk mounted at `/var/data`, `CODEMAP_DB_PATH=/var/data/codemap.db`). Two constraints follow from this design:
-
-- **One instance only.** A persistent disk attaches to a single instance, and SQLite is a single-writer database. Don't scale the backend horizontally.
-- **Persistent disks are typically a paid-plan feature** — confirm your host's current requirements and pricing.
-
-I have not deployed `render.yaml` to a real Render account; treat it as a starting point and verify it (in particular that Node.js is available in the Python runtime for the parser's `npm install`).
-
-### Client-side routing on static hosts
-
-Deep links like `/p/abc123` are handled by the React app, so a hard page load needs the host to serve `index.html` for unknown paths. `frontend/public/_redirects` (Netlify) and `frontend/vercel.json` (Vercel) are included. Verified locally: a hard load of `/p/<id>` against a production build returns the app, not a 404.
-
----
-
-## Fixes from testing real repos
-
-Three more problems, found by running CodeMap against real GitHub
-repositories (Flask, Express, [crocodilestick/Calibre-Web-Automated](https://github.com/crocodilestick/Calibre-Web-Automated) — 395 files, Python+JS) instead of only the small bundled demo repos.
-
-**1. A long filename crashed the entire GitHub analysis.** Calibre-Web-
-Automated contains a test fixture with a 150+ character filename. Combined
-with a temp-directory path, Python's `tarfile.extractall` raised
-`FileNotFoundError` on Windows (MAX_PATH) — and on any OS, since filenames
-are capped around 255 bytes regardless. One unwritable file failed the
-*entire* analysis with a bare 500. Fixed two ways: extraction now skips
-files the scanner would never read anyway (filtering to supported source
-extensions before extracting, not after — faster too), and a single file
-that still can't be written is skipped and counted rather than aborting.
-
-**2. A bare 500 told the user the backend was "unreachable."** The frontend
-treated "no response" and "server responded with an error" as the same
-case. A crash now gets its own FastAPI exception handler that always
-returns JSON with a `detail`, and the frontend distinguishes "can't reach
-the backend" from "the server returned an error ($status)" — see
-`frontend/src/utils/apiError.js`.
-
-**3. A common Python pattern was flagged as 75 broken imports.** Calibre-
-Web-Automated's `cps/duplicates.py` does
-`from . import db, calibre_db, csrf, config, helper`. `db.py` and
-`helper.py` are real files; `calibre_db`, `csrf`, and `config` are
-instances built in `cps/__init__.py` (`calibre_db = CalibreDB()`) and
-re-exported — a common way to expose package-level singletons. The
-resolver assumed every bare `from . import name` must be its own file. Now,
-when that fails, it falls back to the containing package's `__init__.py`
-(guarded against a false self-loop when `__init__.py` imports from itself).
-Python unresolved-import count on that repo: 75 → 1 (the one that's left is
-a genuine third-party package). `from .foo import x` is unaffected — `foo`
-must still resolve as a real module there.
-
----
-
-## GitHub sign-in (OAuth)
-
-Sign-in is entirely optional — every feature works fully anonymously, exactly as before this phase. Signing in with GitHub gets you two things:
-
-1. **Your own 5,000/hour GitHub API rate limit**, instead of sharing the server's (or the server's `GITHUB_TOKEN`, if the operator set one).
-2. **Access to your own private repositories.** Analyzing a private repo without being signed in correctly fails with "repository not found" — GitHub's API returns a 404 for a private repo to anyone without access, indistinguishable from it not existing, which is the right behavior (not leaking whether a private repo exists).
-
-### Why a classic OAuth App, not a GitHub App
-
-A GitHub App's fine-grained, per-repository installable permissions are the more "correct" design long-term, but need a separate installation flow (choosing which repos to grant, on top of signing in) and hourly-expiring installation tokens that must be refreshed. A classic OAuth App with the `repo` scope gets the two goals above in a quarter of the code. The honest trade-off: `repo` grants read/write on every repo the signed-in user can access, more than this tool ever uses (it only reads). Stated plainly, not hidden — a real next step if this were a product rather than a portfolio piece.
-
-### Private repos and shareable links: the actual design problem
-
-Every analysis gets a `/p/:id` link viewable by anyone who has it — that's the whole point of Phase E. Combined with private-repo analysis, that's a real privacy leak unless addressed directly: a private repo's file structure, import graph, and risk data would otherwise be visible to anyone with the link, signed in or not.
-
-Fixed by ownership, not obscurity: a project analyzed from a private repo is tagged `is_private` and stamped with the creating session's id. Every project-read route goes through one shared access-control check (`_get_record_or_404` in `api/projects.py`) — a private project is invisible to any session but its owner, returning **404, not 403** (a shared link to someone else's private analysis looks identical to a stale or wrong link; existence itself isn't revealed). One test (`test_private_repo_lockdown_covers_every_read_route...`) exists specifically so that adding a new `/projects/{id}/...` route later and forgetting to route it through that check gets caught immediately rather than silently shipping a leak.
-
-The GitHub result cache is scoped the same way: every signed-in user's cache is private to them (keyed by session id), even for a repo that turns out to be public — simpler than trying to determine privacy before the cache check (which happens *before* any GitHub API call, by design, so privacy isn't knowable yet at that point) and it closes the same class of leak.
-
-### Session model
-
-- The session cookie (`codemap_session`) holds only an opaque, unguessable id — the real GitHub token never reaches the browser.
-- The token is encrypted at rest (`services/crypto.py`, Fernet) via `CODEMAP_SECRET_KEY`. Unset in local dev, a temporary key is generated per-process with a logged warning — every session is invalidated on the next restart, the same class of problem the old CWD-relative DB-path default caused, but this time intentional and loud rather than silent. Set `CODEMAP_SECRET_KEY` for anything that needs sessions to survive a restart:
-  ```
-  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-  ```
-- Sessions don't expire on a timer — only on sign-out or clearing cookies. A portfolio tool a recruiter might reopen the next day treating that as "silently signed out" seemed like the worse default; logout is still immediate.
-- CSRF protection on the handshake: `/github/login` sets a short-lived `state` value in both the redirect URL and an HttpOnly cookie; `/github/callback` rejects the request outright if they don't match, before ever calling GitHub's token-exchange endpoint.
-
-### Setting it up (optional, for local dev or deployment)
-
-**Local dev — use a `.env` file, not `set`/`$env:` every session.** `backend/app/.env` is loaded automatically on startup (via `python-dotenv`) and is already in `.gitignore`, so it never gets committed:
-
-```powershell
-cd backend\app
-copy .env.example .env
-notepad .env
-```
-
-Fill in whichever of these you need (everything in `.env.example` is commented with what it's for):
-
-1. Register an OAuth App at <https://github.com/settings/developers> → "New OAuth App". Set its "Authorization callback URL" to `http://localhost:8000/api/auth/github/callback`.
-2. Paste the generated Client ID and Client Secret into `CODEMAP_GITHUB_CLIENT_ID` / `CODEMAP_GITHUB_CLIENT_SECRET` in `.env`.
-3. Generate a `CODEMAP_SECRET_KEY` (command is in `.env.example`) and paste it in too, so signed-in sessions survive a server restart instead of being invalidated every time.
-4. Run `uvicorn main:app --reload --port 8000` as usual — no `set`/`$env:` commands needed, `.env` is picked up automatically.
-
-Leave `.env` absent (or those lines blank) to run CodeMap with sign-in simply not offered — nothing else changes, and this is exactly what every earlier phase of this project already did.
-
-**Deployment** doesn't use `.env` (there's no file to upload on most hosts) — set these as real environment variables in your platform's dashboard instead:
-- `CODEMAP_GITHUB_CLIENT_ID`, `CODEMAP_GITHUB_CLIENT_SECRET` — from the OAuth App (register a second one for production, with its callback URL pointed at your deployed backend).
-- `CODEMAP_FRONTEND_URL` — your deployed frontend's URL.
-- `CODEMAP_SECRET_KEY` — required in practice for deployment (an ephemeral key means every restart signs everyone out).
-- `CODEMAP_COOKIE_SECURE=true` — **required once the frontend and backend are on different domains** (the normal case: a Vercel frontend + a Render backend). Browsers refuse cross-site cookies without `SameSite=None; Secure`, which needs HTTPS on both sides. Not needed for local dev — `localhost:5173` and `localhost:8000` count as the same "site" despite the different ports, so `SameSite=Lax` already works there.
-
-### What's verified, and what isn't
-
-Every piece of the OAuth code that doesn't require a real GitHub account is tested and passing: the state-cookie CSRF check, token exchange and session creation (GitHub's endpoints mocked), session lookup/expiry-of-key-rotation handling, token-at-rest encryption, and - most importantly - the full private-repo access-control suite (every read route, every combination of owner/other-user/anonymous). Live in a real browser, I confirmed the "Sign in with GitHub" button does a real round trip to `github.com`'s actual OAuth endpoint with the correct `client_id`/`redirect_uri`/`scope`/`state` intact. **Completing an actual sign-in requires a real registered OAuth App and a real GitHub account to log into, neither of which exists in this sandbox** - so the callback's happy path (token exchange → session → redirect) is verified by mocked tests, not a live end-to-end login. Worth doing yourself once you have real credentials, before relying on this in an interview demo.
-
----
-
-## Guided tour
-
-Two layers, deliberately built and shipped in this order:
-
-### 1. The deterministic tour (zero AI, always available)
-
-`GET /api/projects/{id}/tour?mode=trace|foundation` returns up to 12 stops. There are two directions, because people learn a codebase two ways:
-
-- **Top-down (`trace`, the default).** Start at the entry points - files nothing else imports, like `main.jsx` - and walk down what they import, breadth-first: `main → App → Dashboard → its components`. On a small app this *is* the whole story.
-- **Core first (`foundation`).** The most relied-upon files first, ordered utilities-before-what-uses-them. Better on a library with a shared core (Flask: `app.py`, `ctx.py`, `wrappers.py`).
-
-Stages are named by **role**, not depth: *Entry points*, *Orchestrators* (import more files than import them), *Core logic*, *Building blocks* (leaves). Sibling leaf files collapse into one stop ("8 files used by Dashboard.jsx"), and every stop carries its reasons ("Imported by App.jsx", "Imports 8 files - it wires them together").
-
-Every one of these rules exists because of a failure found by running the tour on a real repo, each with a regression test in `backend/tests/test_tour.py`:
-
-| Found on | What went wrong | Fix |
-|---|---|---|
-| Flask | Selecting by dependency depth filled all 12 slots with trivial leaf files; `app.py`, `ctx.py` never appeared | Select by importance first, use depth only to order the result |
-| PitSynapse (a 32-file app) | 9 identical leaf components listed alphabetically; `index.css` in the tour; `Dashboard.jsx` (imports 8 files) buried at stop 10 labelled "Foundation" | Importance counts imports in **both** directions; stages by role; non-code files excluded; sibling leaves grouped; added the top-down mode |
-| Flask, Express | The only files nothing imports were `examples/` apps, so the trace started in demo code | `examples`, `docs`, `fixtures`, `test(s)`, `scripts` directories and `*.config.*` files are excluded |
-| PitSynapse | The Python backend shares no imports with the React frontend (they talk over HTTP) | Files with no import connections can't be placed in a dependency order, so they're left out and the response says how many (`note`) rather than padding the tour |
-
-Limits worth knowing: an import graph can't see HTTP calls between a frontend and backend, so those show up as two disconnected islands; and a repo whose real source lives under a directory named `examples` or `scripts` will have it excluded (falling back to including everything only if nothing else is left).
-
-### 2. AI narration (opt-in, and allowed to fail)
-
-A "✨ Narrate with AI" button (never automatic) calls `POST /tour/narrate`, which asks Gemini for one plain-language sentence per stop and attaches it alongside the deterministic reasons. Four constraints, carried over from this project's GitHub-rate-limit lesson in earlier phases — a free AI key will hit its own wall during exactly the traffic burst that matters most (recruiters evaluating in a cluster) — are all enforced server-side:
-
-- **The deterministic tour never depends on this layer.** `graph/tour.py` has no import of, or dependency on, anything AI-related.
-- **Opt-in only.** Narration is a `POST`, triggered only by the button; it's never called as a side effect of loading the tour or the project page.
-- **Cached per project and direction, forever.** A project's graph is immutable once analyzed, so its narration is fetched from Gemini at most once per project per direction (the two directions produce different stops, so a narration is never attached to the wrong one) (`ai_tour_cache` table) — reopening the tour later serves the cached result instantly, no new API call.
-- **Server-wide rate limit** (20 requests/hour, in-memory — deliberately not persisted, since this is a safety cap on spend, not user data, and should reset on restart) and a strict response-shape check: if Gemini returns a different number of lines than there are stops, the mismatch is rejected rather than risking a sentence attached to the wrong file.
-
-Any failure at any of those points — not configured, rate-limited, a network error, a malformed response — returns the **already-working deterministic tour** plus a short explanation of what didn't work, never a broken page. Verified live: with no `GEMINI_API_KEY` set, clicking the button shows the fallback notice while every stop stays fully visible underneath it.
-
-**Privacy note:** only structural metadata ever leaves the server for narration — file paths, architecture categories, dependency counts, which stage a file falls into. Never file contents. This matters most for a signed-in user's own private repo: CodeMap reads the source to build the graph, but what reaches Gemini is the shape of the graph, not the code in it (`backend/tests/test_ai_tour.py::test_prompt_sends_structure_only_never_file_contents` checks this directly).
-
-**Setup:** set `GEMINI_API_KEY` (in `backend/app/.env`, same as the GitHub OAuth variables — see "GitHub sign-in" above) to a key from [Google AI Studio](https://aistudio.google.com/apikey). The model is set in one place, `GEMINI_MODEL` in `backend/app/.env` (never edit it in code; the code only holds a fallback default), and defaults to `gemini-2.5-flash` — model IDs get retired (this project's first draft hardcoded `gemini-1.5-flash`, which Google's current supported-model list no longer includes, and would have failed outright; caught by checking the docs before shipping). If the configured model is retired, the tour says so and names the variable to change instead of showing a generic error. For any other provider error the tour shows Google's own explanation (e.g. an invalid key, a quota or billing message) alongside a plain-language hint for the status code - an earlier version showed only the bare number (`returned an error (402)`), which left the cause a guess. The API key is sent in the `x-goog-api-key` header (as Google's docs do), not in the URL, is stripped of pasted whitespace/quotes, and is redacted from any message shown to the browser. When Google rejects a key, the backend console logs its length and first four characters (never the whole key) - keys from AI Studio start with `AIza` or the newer `AQ.`. To test a key outside the app, run `python check_gemini.py` from `backend\app`: it uses your `.env`, the same model and header the app uses, tells you whether the key authenticates and whether the model can generate, and says what the result means (the same 401 is widely reported for some accounts' new `AQ.` keys). A `402` means the Google project's prepaid billing credits are used up - a billing issue on Google's side of the key, not a code or key problem. Leave it unset to run CodeMap with narration simply not offered — the deterministic tour is unaffected either way.
-
-**4. A Python backend showed zero connections.** On a real project (a React frontend plus a FastAPI backend) every Python file looked isolated. The files import each other relative to the folder the app is run from - `from routes.simulation import router` in `backend/main.py` - but the resolver only looked for `routes/` at the repository root, so every such import was classified as an external package. I had also explained the missing edges away as "the backend talks to the frontend over HTTP" without checking; the imports were right there. Absolute imports are now resolved against, in order: the project root, `<root>/src`, then each parent directory of the importing file (how Python itself behaves when a script's folder is on `sys.path`). Standard-library names are never resolved through the parent-directory step, so a local `json/` folder can't capture `import json`. Measured on real repos: PitSynapse 0 → 6 Python edges, the FastAPI full-stack template 0 → 71, Flask 104 → 186 (tests now connect to `src/flask`), with **0 existing edges lost**, and the new edges spot-checked as real. Regression tests: `backend/tests/test_python_import_roots.py`. Still not supported: projects that find their code through `sys.path` edits or `PYTHONPATH` outside the importing file's own ancestors.
-
----
-
-## Scaling behavior (found by analyzing real repos)
-
-Running CodeMap against real projects (Express, 141 files; Flask, 83 files) found two problems the small demo repos could never show:
-
-1. **Cycle explosion.** Flask's 19-file core has 9,629 distinct elementary cycles. Listing them is unreadable, and enumerating them is unbounded-cost on denser graphs. Now: membership in a cycle comes from strongly connected components (exact, linear time); the listed cycles are capped at 200, shortest first, chosen deterministically, with a `cyclesTruncated` flag and a "200+" display. The CLI's baseline diff compares whole tangled clusters instead of individual cycles when truncated, so unrelated changes can't make a PR check flap.
-2. **Layout blow-up.** dagre puts every unconnected file on one rank, so Flask's 60+ isolated files became a single column thousands of pixels tall, pushing the real dependency graph off-screen. Now isolated files are laid out in a compact grid below the connected graph.
-
-Measured (this sandbox): Express (141 files) 1.6s, Flask (83 files) 0.24s,
-Calibre-Web-Automated (395 files, Python+JS) 13.2s end to end — almost all
-of that last one is the one-shot Node/Babel subprocess parsing ~196 JS
-files (12.4s of the 13.2s, profiled with `cProfile`). That subprocess is
-unchanged from Phase 1; it hasn't been a bottleneck until a repo this size.
-If it becomes one, the fix is parsing in a persistent Node process instead
-of spawning fresh each time — not yet done.
-
----
-
-## Security
-
-CodeMap analyzes **untrusted input by design**: anyone can point a public deployment at any GitHub repo, and every file in it gets parsed. So the threat model is a hostile repository and a hostile anonymous visitor, not just a typo in a form. The codebase was audited by reading every entry point, then each suspected issue was **proven with a working exploit before being fixed**, and each fix is pinned by a regression test that was **mutation-checked** (the vulnerability was re-introduced and the test confirmed to fail). 83 of the 376 backend tests live in `backend/tests/test_security.py`.
-
-### What was found and fixed
-
-| Severity | Issue | Fix |
-|---|---|---|
-| High | **Any visitor could analyze any folder on the server** (`{"path": "/etc"}`): a filesystem-structure disclosure plus a path-existence oracle | Local paths are off unless `CODEMAP_ALLOW_LOCAL_PATHS=true`; optional `CODEMAP_LOCAL_PATH_ROOTS` allow-list resolved through symlinks; the UI hides the option via `/api/config` |
-| High (if the operator's `GITHUB_TOKEN` can see private repos) | **A forged session cookie was accepted as an identity**, so an anonymous visitor could analyze and then own "private" projects via the server's shared token | Identity is now only ever a *validated* session; private repos are refused before download when only the shared token is available, with the same message as "not found" |
-| Medium | **`..` in a GitHub URL** (`github.com/../user`) was normalized by the HTTP client into a *different* GitHub API endpoint, carrying the signed-in user's token | Strict owner/repo/ref grammar; dot-segments rejected; ref quoted into the URL |
-| Medium | **Sessions never expired server-side; the raw session id sat in the database** (a DB copy = account takeover); the `repo`-scoped GitHub token outlived logout | Sessions expire after the same 30 days the cookie claims; only a SHA-256 of the id is stored (and used as the private-project owner key); logout revokes the token at GitHub |
-| Medium | **Decompression bombs and unbounded downloads/repos**: no byte, entry, file-size or file-count caps | Streaming download cap + wall-clock deadline; tar entries counted and sized *while streaming*; per-file and file-count caps in the extractor and scanner |
-| Medium | **GitHub Action script injection**: `${{ inputs.* }}` expanded straight into bash (`$(whoami)` ran as root) | Inputs only via `env:`, validated, and confined to the workspace; no expression appears inside any script |
-| Medium | **No rate limiting** (CPU exhaustion, burning the shared GitHub token and the AI budget) | Per-client limits on uncached analyses and AI narration (cache hits stay free), a generous global limit, bounded memory |
-| Low | Scanner followed file symlinks out of the repo; config files from the repo were read unbounded | Symlinks skipped; configs must be inside the project, regular, and under 1 MB |
-| Low | One hostile `.py` (a long `1+1+1…` chain) raised an unhandled `RecursionError` and aborted the whole analysis | The full parser-failure family is caught per file |
-| Low | PR comment built from the PR author's file paths (markdown/`@mention` injection); comment lookup spoofable by any commenter; CI-log command injection via newline in a filename | Paths escaped with a CommonMark-correct code fence; hidden marker + bot-only lookup, paginated; control characters stripped |
-| Low | Repo-controlled text (names, paths) flowed raw into the Gemini prompt; AI limit was server-wide only | Sanitized, fenced as untrusted data, output length-capped; added a per-client limit |
-
-Hardening that wasn't a specific bug: Origin check on every state-changing request (on top of `SameSite`), CORS limited to the methods and headers actually used (a wildcard origin is refused at startup), security headers and `no-store` on every API response, `Secure` cookies whenever the frontend is HTTPS, constant-time OAuth state comparison, the Node parser launched with a scrubbed environment and a heap cap, owner-only database file, a ceiling on stored projects, a CSP for the frontend that allows the one inline script by hash (and a test that fails if they drift apart), SHA-pinned GitHub Actions, hash-locked Python dependencies (`requirements.lock`), `npm ci`, Dependabot to keep the pins fresh, and a clean `npm audit` / `pip-audit`.
-
-### Configuration
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `CODEMAP_ALLOW_LOCAL_PATHS` | off | Allow analyzing folders on the server. Local development only |
-| `CODEMAP_LOCAL_PATH_ROOTS` | unset | If set, local analysis is confined to these folders |
-| `CODEMAP_ALLOWED_ORIGINS` | localhost:5173 | Exact frontend origin(s); `*` is refused |
-| `CODEMAP_ALLOWED_HOSTS` | any | Accepted `Host` headers |
-| `CODEMAP_DISABLE_DOCS` | off | Hide `/docs`, `/redoc`, `/openapi.json` |
-| `CODEMAP_ANALYZE_LIMIT` / `_WINDOW_SECONDS` | 12 / 600 | Uncached analyses per client |
-| `CODEMAP_NARRATE_LIMIT` | 6 per hour | AI narrations per client |
-| `CODEMAP_GLOBAL_LIMIT` | 600 per minute | Any API request per client |
-| `CODEMAP_MAX_PROJECTS` | 5000 | Oldest saved projects are dropped beyond this |
-
-### What this does NOT cover (be honest about it)
-
-- **The OAuth `repo` scope is broad.** A classic OAuth App cannot request read-only private-repo access; only a GitHub App can. Mitigations are in place (encrypted at rest, revoked on logout, 30-day expiry) but the real fix is migrating to a GitHub App with fine-grained permissions.
-- **The rate limiter is in-memory and per-process**, which matches the single-worker deployment but would need a shared store (Redis) if you ever ran several workers. It also depends on `--forwarded-allow-ips` being right for your host; clients behind one NAT share a budget.
-- **Prompt injection is contained, not prevented.** The AI only fills a short plain-text field, the input is sanitized and fenced, and the output is capped and rendered as text; a determined attacker can still influence a sentence of narration about their own repo.
-- **Private-repo graphs are stored unencrypted in SQLite** (only the GitHub tokens are encrypted). Use disk-level encryption on the host.
-- **The CSP keeps `style-src 'unsafe-inline'`** (React and React Flow set inline styles) and starts with `connect-src https:` until you pin your API origin.
-- **No audit logging, alerting or per-user quotas**, and **no external penetration test**.
-- **Not yet verified live:** a real OAuth round trip, the security headers on a real host, and the Action's PR-comment step (it needs a live token and an open PR). The Action's shell logic and every other fix is tested with real inputs.
-- `requirements.lock` is for Linux (CI and deployment); on Windows keep using `requirements.txt`.
-
----
-
-## Testing
-
-Backend: 376 tests covering the scanner, parser bridge, classifier, resolver,
-graph builder (including import-symbol capture and the duplicate-import
-merge behavior), cycle detection, metrics, impact analysis, architecture
-classification (including Django's flat-file conventions), risk scoring,
-the GitHub fetcher (URL parsing, size guard, rate-limit handling, tar-slip
-protection — all mocked, network-independent), GitHub result caching
-(cache hits skip re-fetching, force-refresh bypasses the cache, local paths
-are never cached, entries expire after the TTL), the Python parser and
-resolver (every import form, relative-level directory walking, local vs.
-external classification, the project-root containment guard), a dedicated
-cross-language integration suite (a `.py` and `.js` file sharing a base
-name provably never link to each other), the CLI (11 subprocess-level tests
-covering exit codes, baseline diffing, and gating logic), and full API
-integration (including a regression test for a route-ordering bug caught
-during development — see `backend/tests/test_api.py`), SQLite persistence
-across real process boundaries, cycle-detection scaling (dense-graph
-capping, exact membership, cross-process determinism, baseline-diff
-stability when truncated), the default DB path being independent of the
-process's launch directory, GitHub tarball extraction (unwritable files
-skipped and counted rather than crashing the whole analysis, path-traversal
-still rejected, unexpected errors always return JSON), and a Python import
-resolver fix (see "Fixes from testing real repos" below), and GitHub OAuth
-(state-cookie CSRF protection, token exchange and session creation with
-GitHub's endpoints mocked, token-at-rest encryption, and private-repo
-access control across every project-read route), and the guided tour
-(importance-first selection with a regression test built from a real
-failure on the Flask repo, AI-narration caching, rate limiting, and
-graceful degradation for every kind of AI-layer failure).
-
-```powershell
-cd backend
-python -m pytest tests\ -v
-```
-
-Frontend: 103 `vitest` tests (jsdom + Testing Library) covering the filter
-predicates, the dagre layout (isolated-file grid, no overlaps, feedback
-edges), the HomePage analyze-then-navigate flow, the ProjectPage
-fetch-by-URL / not-found / backend-down / copy-link (including clipboard
-failure) states, and the project stats panel. Run with `npm test` from
-`frontend/`.
-
-Known gap: React Flow itself is stubbed in the page tests (jsdom has no
-layout engine), so canvas rendering is verified separately in a real
-browser, not by the automated suite.
+| GET | `/api/health` | Liveness check |
+| GET | `/api/config` | Server capabilities the UI adapts to (e.g. `allowLocalPaths`) |
+| POST | `/api/analyze` | `{ githubUrl }` (or `{ path }` if enabled) -> runs the pipeline, returns `projectId`. Rate-limited; cache hits are free |
+| GET | `/api/projects/{id}` | Summary stats |
+| GET | `/api/projects/{id}/graph` | Nodes and edges |
+| GET | `/api/projects/{id}/files[/{path}]` | File list / one file's detail |
+| GET | `/api/projects/{id}/files/{path}/dependencies` `/dependents` `/impact` | Direct deps, direct dependents, change impact |
+| GET | `/api/projects/{id}/cycles` `/metrics` | Cycles, aggregate metrics |
+| GET | `/api/projects/{id}/tour?mode=trace\|foundation` | Deterministic guided tour |
+| POST | `/api/projects/{id}/tour/narrate` | Opt-in AI narration (cached) |
+| GET | `/api/auth/github/login` `/callback` `/me`, POST `/logout` | GitHub OAuth session |
 
 ---
 
 ## Deployment
 
-With GitHub URL support, a public deployment now makes real sense — anyone
-can paste a public repo URL and get results, without needing anything on
-the server beforehand. Local-path mode is **disabled** on a deployment
-(and by default everywhere): "local path" would mean *that server's* files,
-which no visitor should be able to browse. GitHub URL mode is what makes a
-public demo link work for anyone else.
+CodeMap runs on **free tiers**: the frontend on Vercel, the backend as a Docker container on Render's free web service, and SQLite backed up continuously to a Backblaze B2 bucket.
 
-**Backend** — Render or Railway (confirm current pricing and plan
-requirements yourself). Both support a standard `uvicorn` process. **Attach
-a persistent disk and set `CODEMAP_DB_PATH` (see "Persistence" above) or
-every redeploy deletes all saved projects and shared links.**
-Install with `pip install --require-hashes -r requirements.lock` (exact,
-hash-verified versions; Linux) and `npm ci` in `backend/parser`. Set the start
-command to `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips='*'`
-from `backend/app/` (one worker: SQLite is single-writer and the rate limiter is
-in-memory; the proxy flags make per-client rate limits see real visitors instead
-of your host's proxy — `'*'` is only safe because the app is reachable solely
-through that proxy), and set these environment variables:
-- `CODEMAP_ALLOW_LOCAL_PATHS=false` (the default; never turn it on for a public server), `CODEMAP_DISABLE_DOCS=true`, and `CODEMAP_ALLOWED_HOSTS=<your API hostname>`. Also `CODEMAP_GITHUB_REDIRECT_URI=https://<your-api>/api/auth/github/callback` if offering sign-in, so the OAuth redirect never depends on the incoming Host header.
-- `CODEMAP_DB_PATH` — a path on the persistent disk, e.g. `/var/data/codemap.db`
-- `CODEMAP_ALLOWED_ORIGINS` — your deployed frontend's URL (comma-separated if more than one)
-- `GITHUB_TOKEN` — use a **fine-grained token limited to public-repo read access, never a classic `repo`-scope token** (the server also refuses private repos when only this shared token is in play, but least privilege is the real protection). Recommended for a public deployment for *anonymous* visitors; without it, GitHub's 60-requests/hour limit is shared across every unauthenticated visitor hitting your deployed backend from the same server IP. A token (no special scopes needed for public repos) raises that to 5,000/hour. Signed-in visitors use their own token instead (see "GitHub sign-in" above) and aren't affected by this either way.
-- `CODEMAP_GITHUB_CLIENT_ID`, `CODEMAP_GITHUB_CLIENT_SECRET`, `CODEMAP_SECRET_KEY`, `CODEMAP_COOKIE_SECURE=true` — only if offering GitHub sign-in; see "GitHub sign-in" above for what each does. `CODEMAP_COOKIE_SECURE=true` specifically is required once frontend and backend are on different domains (the normal case for Vercel + Render), or the session cookie silently never gets sent.
-- `CODEMAP_FRONTEND_URL` — your deployed frontend's URL, so the OAuth callback redirects somewhere real instead of `localhost:5173`.
-- `GEMINI_API_KEY` — only if offering AI tour narration; see "Guided tour" above. Leave unset to offer the tour without narration.
+```mermaid
+flowchart LR
+    V["Vercel<br/>static frontend"] -->|HTTPS + cookies| R
+    subgraph R["Render free web service (Docker, 512 MB)"]
+        U["uvicorn / FastAPI"] --- N["Node parser"]
+        U --- DB[("SQLite<br/>ephemeral disk")]
+        L["Litestream"] -.watches.-> DB
+    end
+    L -->|continuous replication| B[("Backblaze B2 bucket")]
+    B -.->|restore on every cold start| DB
+```
 
-Make sure Node.js is available in the build environment and that
-`backend/parser`'s `npm install` runs as part of your build step.
+**The problem:** a free web service has an *ephemeral* disk, wiped on every redeploy, restart and idle spin-down. SQLite alone would lose every saved project and share link.
 
-**Frontend** — Vercel or Netlify. Set the `VITE_API_BASE_URL` build-time
-environment variable to your deployed backend's URL (see
-`frontend/.env.example`). Security headers (CSP, `X-Frame-Options`, etc.) ship
-in `vercel.json` and `public/_headers`; after deploying, tighten the CSP's
-`connect-src` from `https:` to your exact API origin.
+**The fix:** [Litestream](https://litestream.io) replicates the database to an S3-compatible bucket, and the container entrypoint (`backend/docker/entrypoint.sh`) restores it on boot. Every step fails *closed*: restore if there is no local DB, run `PRAGMA integrity_check`, quarantine and fall back to older points in time if damaged, and **refuse to start** if a backup exists but can't be read (booting empty would replicate an empty database over the history).
 
-Neither platform choice is load-bearing — any host that runs a persistent
-Python process with a persistent disk (not just serverless functions,
-since this uses a local SQLite file and spawns subprocesses) works for the backend, and any
-static host works for the frontend.
-
----
-
-## Resume bullets
-
-- Built an AST-based static analysis engine for JavaScript/TypeScript repositories that extracts module dependencies and generates interactive codebase architecture graphs.
-- Implemented graph-based impact analysis, circular dependency detection, module centrality metrics, and deterministic code-change risk scoring using NetworkX.
-- Developed a React + FastAPI developer dashboard with repository exploration, dependency visualization, file-level metrics, architecture classification, and impact analysis.
-
-## Deployment: free tier + Litestream
-
-Free hosts (e.g. Render's free web service) give the container an **ephemeral disk**: it is
-wiped on every redeploy, restart and idle spin-down, and no persistent disk can be attached.
-CodeMap keeps SQLite (single process, no write concurrency) and adds
-[Litestream](https://litestream.io): it streams the database to an S3-compatible bucket
-(Backblaze B2, Cloudflare R2, MinIO) and `backend/docker/entrypoint.sh` restores it on boot.
-
-Order at startup (every step fails *closed*): restore if no local DB -> `PRAGMA integrity_check`
--> on damage, set the file aside and try older points in time -> if a backup exists but cannot
-be read, **refuse to start** (booting empty would replicate an empty database over the history)
--> run the server under `litestream replicate -exec`, which forwards SIGTERM and does a final sync.
-
-Measured behaviour (real Litestream 0.5.17, `backend/docker/e2e_replication.py`, folder and
-S3-compatible replicas, also as an unprivileged user):
+**Measured behaviour** (real Litestream 0.5.17, `backend/docker/e2e_replication.py`, against a folder replica and an S3-compatible server, including as an unprivileged user):
 
 | Situation | Result |
 |---|---|
 | Disk wiped, restart | Same projects and graphs restored |
-| Damaged local DB | Detected, quarantined (`*.corrupt-<time>`), restored |
+| Damaged local DB | Detected, quarantined, restored |
 | Bucket unreachable, no local DB | Refuses to start within the restore timeout (no hang, no empty DB) |
-| Hard kill (OOM) right after a save | Saves older than ~2 s survive; the last ~1-2 s can be lost |
-| Deploy overlap (old + new instance on one bucket path) | Backup stays valid, but **the old instance's writes in that window are silently dropped** |
+| Hard kill (e.g. OOM) right after a save | Saves older than ~2 s survive; the last 1-2 s can be lost |
+| Deploy overlap (old and new instance, one bucket path) | Backup stays valid, but **the old instance's writes in that window are silently dropped** |
 
-Known limits, stated plainly: overlap loss above (so `autoDeploy: false`; Litestream's lease
-protection exists only in its Go library, not the CLI); the in-memory rate limiter resets on
-every cold start; free hosts spin down when idle (about a minute to wake); never run two
-instances against one bucket path; not yet run on a real Render account or against real B2/R2.
+Verified on the live deployment: restore after the service sleeps, restore after a manual redeploy, and the full GitHub OAuth round trip with cross-site cookies. Because of the overlap result, **auto-deploy is turned off** and deploys are manual.
+
+**Run the image locally**
+```bat
+cd backend
+docker build -t codemap-api:dev .
+docker run --rm -p 8000:8000 -v codemap-data:/data codemap-api:dev
+```
+Set the `LITESTREAM_*` variables (see `render.yaml` and `backend/app/.env.example`) to enable replication. The image runs as a non-root user, installs hash-locked Python dependencies, verifies the Litestream binary by SHA-256, and caps the Node parser's heap (`CODEMAP_PARSER_MAX_HEAP_MB=192`) so a huge repo fails cleanly instead of OOM-killing the container. Peak memory measured under a 512 MB limit while analyzing the FastAPI template: about 267 MiB, no OOM kill.
+
+`render.yaml` is the Render blueprint. Frontend: set `VITE_API_BASE_URL` (it is baked in at build time) and deploy `frontend/` to any static host; security headers ship in `vercel.json` and `public/_headers`.
+
+---
+
+## Security
+
+CodeMap analyzes **untrusted input by design**: anyone can point it at any public repo, and every file in it gets parsed. The threat model is a hostile repository and a hostile anonymous visitor. The codebase was audited by reading every entry point; each suspected issue was **proven with a working exploit before it was fixed**, and each fix has a regression test that was **mutation-checked** (the bug was re-introduced and the test confirmed to fail).
+
+| Severity | Found | Fixed by |
+|---|---|---|
+| High | Anyone could analyze any server folder (`{"path":"/etc"}`) | Local paths off by default; optional allow-listed roots; UI hides the option |
+| High | A forged session cookie was accepted as an identity, enabling anonymous "ownership" of private projects | Identity comes only from a *validated* session; private repos refused before download when only the shared token exists |
+| Medium | `..` in a GitHub URL was normalized into a different API endpoint carrying the user's token | Strict owner/repo/ref grammar; dot-segments rejected |
+| Medium | Sessions never expired, raw ids sat in the DB, tokens outlived logout | 30-day server-side expiry; only a SHA-256 stored; logout revokes the token at GitHub |
+| Medium | No caps on download size, entries or files (decompression bombs) | Streaming caps, wall-clock deadline, per-file and file-count limits |
+| Medium | GitHub Action script injection (`$(whoami)` ran as root) | Inputs only via `env:`, validated, confined to the workspace |
+| Medium | No rate limiting | Per-client limits on uncached analyses and AI narration; generous global limit |
+| Low | Symlink following, unbounded config reads, `RecursionError` on a hostile `.py`, PR-comment markdown injection, prompt-text injection | Each fixed and tested (see `backend/tests/test_security.py`, 83 cases) |
+
+Also in place: Origin check on state-changing requests, locked-down CORS (wildcard refused), security headers and `no-store` on API responses, `Secure` cookies, constant-time OAuth state comparison, a scrubbed environment for the Node parser, an owner-only database file, a ceiling on stored projects, a frontend CSP (the one inline script allowed by hash, with a test that fails if it drifts), SHA-pinned GitHub Actions, hash-locked dependencies, Dependabot, and clean `npm audit` / `pip-audit`.
+
+### Honest limits
+
+- The OAuth `repo` scope is broader than this tool needs. A classic OAuth App cannot request read-only private access; migrating to a GitHub App is the real fix.
+- The rate limiter is in-memory and per-process, which fits the single-worker deployment. It resets on every cold start, and scaling out would need a shared store.
+- Prompt injection is contained, not prevented: the AI fills one short plain-text field from sanitized, fenced input, and its output is capped and rendered as text.
+- Private-repo graphs are stored unencrypted in SQLite (only GitHub tokens are encrypted). The Litestream backups hold the same data, so keep the bucket private.
+- The CSP keeps `style-src 'unsafe-inline'` (React Flow sets inline styles) and still allows `connect-src https:` until pinned to the API origin.
+- No audit logging, per-user quotas, or external penetration test.
+
+---
+
+## Testing
+
+| Suite | Count | Run |
+|---|---|---|
+| Backend (pytest) | 415 | `cd backend && python -m pytest tests\ -q` |
+| Frontend (Vitest + Testing Library) | 103 | `cd frontend && npm test` |
+| Replication drill (real Litestream) | 20 checks | `python backend/docker/e2e_replication.py` (Linux or inside the image) |
+
+The backend suite covers the scanner, both parsers and resolvers, the graph engine, risk scoring, the GitHub fetcher (mocked, network-independent), SQLite persistence across real process boundaries, OAuth and private-repo access control across every read route, the CLI as a subprocess, the guided tour, and the deployment files themselves. Tests are isolated from the developer's environment: secrets and limits are stripped, and any un-mocked real HTTP call raises.
+
+Not covered by automated tests: React Flow rendering is stubbed in jsdom, so the canvas is checked in a real browser, and there is no browser-automation suite yet.
+
+---
+
+## Problems found by running it on real repos
+
+Most of the interesting engineering came from real repositories, not the demos:
+
+- **Cycle explosion.** Flask's 19-file core has 9,629 elementary cycles. Membership now comes from strongly connected components; listed cycles are capped.
+- **Layout blow-up.** Isolated files stacked into one column thousands of pixels tall; they now go in a compact grid.
+- **A 150-character filename crashed a whole analysis** on Windows. Extraction now filters to source files first and skips any single unwritable file.
+- **A common Python pattern was flagged as 75 broken imports** (`from . import calibre_db`, a package-level singleton). Unresolved imports on that repo went from 75 to 1.
+- **A Python backend showed zero connections** because imports resolve relative to the run folder, not the repo root. I had first explained the missing edges away as "they talk over HTTP" without checking; the fix added `src/` and parent-directory roots (PitSynapse 0 -> 6 edges, FastAPI template 0 -> 71).
+- **Test files were classified as Routes** (first-match-wins folder rules). Test detection now runs first.
+- **A docs-only repo reported "Unexpected tarball structure"**, blaming GitHub for what was really "nothing to analyze".
+- **The S3 backup config uploaded nothing.** `part-size: 5MB` is read as 5,000,000 bytes, below S3's 5 MiB minimum, so every upload failed while the app ran normally. Found only by running the config against an S3-compatible server; now pinned by a test.
+- **The app failed its own platform's health check.** Host-header protection rejected the platform's private-address probe with a 400. Fixed by exempting exactly `GET`/`HEAD /api/health`, with tests that every other path stays strict.
+
+---
+
+## Known limits and what is not verified
+
+**Analysis limits**
+- Aliases from webpack/Babel/Next configs not mirrored in a tsconfig, `package.json` `exports`/`imports`, and `extends` of packages in `node_modules` are not resolved. Aliases to build-generated folders show as unresolved until you build.
+- Python: PEP 420 namespace packages are not distinguished, `src/`-layout projects nested below the analyzed folder are unsupported, and `sys.path` edits are not followed.
+- No other languages, no git history (a GitHub analysis is a snapshot of one ref), and repos over 200 MB are rejected before download.
+- An import graph cannot see HTTP calls, so a frontend and its backend appear as two islands.
+- Large repos parse slowly (a 395-file Python+JS repo took 13 s locally, almost all in the Node parser), and analysis is one blocking request today.
+
+**Deployment limits**
+- Single instance only; free-tier cold starts take about a minute; replication lag means a hard kill can lose the last 1-2 seconds of writes.
+- Free instances may have far less CPU than a laptop, so large analyses can be noticeably slower than the local numbers above.
+
+**Not verified**
+- The Action's PR-comment step has not been run against a live pull request.
+- The deploy-overlap measurement used a folder replica and a local S3 server, not Backblaze B2 itself.
+- No external security review.
+
+---
+
+## Roadmap
+
+- Pin the frontend CSP `connect-src` to the API origin.
+- Background analysis with progress, replacing the single blocking request.
+- A small Playwright browser suite.
+- A persistent Node parser process instead of spawning one per analysis.
+- Migrate OAuth to a GitHub App for fine-grained, read-only access.
+
+---
+
+## Project layout
+
+```
+backend/
+  app/          FastAPI app: analyzer/ (scan, parse, resolve), graph/ (engine, tour), services/ (store, security), api/
+  parser/       Node + Babel import extractor (one-shot subprocess)
+  docker/       entrypoint, Litestream configs, replication drill
+  tests/        415 tests
+  Dockerfile
+frontend/       React + Vite + Tailwind v4 + React Flow + dagre (Geist / Geist Mono)
+examples/       demo repos and edge-case fixtures
+action.yml      composite GitHub Action
+render.yaml     Render blueprint (Docker, free plan)
+```
