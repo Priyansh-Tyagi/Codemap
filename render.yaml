@@ -1,62 +1,72 @@
-# Render blueprint for the CodeMap backend. NOT yet tested on a real Render
-# account - verify before relying on it. The disk is what keeps saved
-# projects and shared links alive across redeploys; it requires a paid plan
-# and pins the service to a single instance (SQLite is single-writer).
+# Render blueprint for the CodeMap backend on the FREE plan, using Docker + Litestream.
+# NOT yet deployed to a real Render account - verify each setting in the dashboard.
+#
+# Free web services have an EPHEMERAL filesystem (wiped on every redeploy, restart and
+# idle spin-down) and cannot attach a disk, so SQLite alone would lose every saved
+# project. Litestream (inside the image) streams the database to an S3-compatible
+# bucket and restores it on boot. See README "Deployment: free tier + Litestream".
 services:
   - type: web
     name: codemap-api
-    runtime: python
-    plan: starter
-    rootDir: backend
-    # requirements.lock = exact versions + hashes, so only reviewed artifacts install;
-    # `npm ci` installs exactly package-lock.json (plain `npm install` can drift).
-    buildCommand: pip install --require-hashes -r requirements.lock && cd parser && npm ci
-    # --workers 1: SQLite is single-writer and the rate limiter is in-memory.
-    # --proxy-headers/--forwarded-allow-ips: behind Render's proxy every request
-    # arrives from the proxy's address; without this the per-client rate limits
-    # would treat ALL visitors as one client. '*' is acceptable here only because
-    # the service is reachable solely through Render's proxy - on a host where the
-    # port is directly exposed, list the proxy's address instead.
-    startCommand: cd app && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips='*'
-    disk:
-      name: codemap-data
-      mountPath: /var/data
-      sizeGB: 1
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    # IMPORTANT - keep this false. During an automatic deploy the old and new instances
+    # run side by side and both replicate to ONE bucket path; measured here: the OLD
+    # instance's writes in that window are silently dropped (the backup stays valid).
+    # Deploy by hand, when nobody is likely to be saving a project.
+    autoDeploy: false
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.8   # the version the lockfile and test suite were verified on
-      # Never expose "analyze a folder on the server" publicly: it would let any
-      # visitor map the server's own filesystem. Off is also the default; stated
-      # here so nobody has to wonder.
+      # --- replication (see backend/docker/litestream.yml) ---
+      - key: LITESTREAM_ENABLED
+        value: "true"
+      - key: LITESTREAM_BUCKET
+        sync: false     # your bucket name
+      - key: LITESTREAM_ENDPOINT
+        sync: false     # full URL, e.g. https://s3.us-west-004.backblazeb2.com
+      - key: LITESTREAM_REGION
+        sync: false     # B2 example: us-west-004
+      - key: LITESTREAM_ACCESS_KEY_ID
+        sync: false     # an application key limited to THIS bucket only
+      - key: LITESTREAM_SECRET_ACCESS_KEY
+        sync: false
+      - key: LITESTREAM_PATH
+        value: codemap
+      # --- app ---
+      - key: CODEMAP_DB_PATH
+        value: /data/codemap.db
+      # 512 MB is shared by Python, Litestream and the Node parser; keep Node's heap small
+      # so a huge repo fails cleanly instead of OOM-killing the container mid-backup.
+      - key: CODEMAP_PARSER_MAX_HEAP_MB
+        value: "192"
+      # Fewer saved projects = a smaller database to download on every cold start.
+      - key: CODEMAP_MAX_PROJECTS
+        value: "300"
       - key: CODEMAP_ALLOW_LOCAL_PATHS
         value: "false"
       - key: CODEMAP_DISABLE_DOCS
-        value: "true"   # hides /docs, /redoc and /openapi.json
+        value: "true"
       - key: CODEMAP_ALLOWED_HOSTS
-        sync: false     # set to your API hostname, e.g. codemap-api.onrender.com
-      - key: CODEMAP_GITHUB_REDIRECT_URI
-        sync: false     # only if offering sign-in: https://<your-api>/api/auth/github/callback
-      - key: CODEMAP_DB_PATH
-        value: /var/data/codemap.db
+        sync: false     # your API hostname, e.g. codemap-api.onrender.com
       - key: CODEMAP_ALLOWED_ORIGINS
-        sync: false   # set to your deployed frontend URL
-      - key: GITHUB_TOKEN
-        # Optional (raises anonymous visitors' limit 60/hr -> 5,000/hr), but treat it as
-        # PUBLIC data only: use a fine-grained token with read access to public repos and
-        # NOTHING else, never a classic token with the `repo` scope. Private repos are also
-        # refused in code when only this shared token is in play, but least privilege is the
-        # real protection.
-        sync: false
-      - key: CODEMAP_FRONTEND_URL
-        sync: false   # only if offering GitHub sign-in - your deployed frontend's URL
-      - key: CODEMAP_GITHUB_CLIENT_ID
-        sync: false   # only if offering GitHub sign-in
-      - key: CODEMAP_GITHUB_CLIENT_SECRET
-        sync: false   # only if offering GitHub sign-in
-      - key: CODEMAP_SECRET_KEY
-        sync: false   # only if offering GitHub sign-in - generate with:
-                       # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+        sync: false     # your deployed frontend URL, exactly
       - key: CODEMAP_COOKIE_SECURE
-        value: "true" # required once frontend/backend are on different domains (the normal case here)
+        value: "true"
+      # MUST be set (and never changed): it encrypts stored GitHub tokens. If it is unset the
+      # key is random per start, so every restored database holds tokens nobody can decrypt.
+      - key: CODEMAP_SECRET_KEY
+        sync: false     # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: CODEMAP_FRONTEND_URL
+        sync: false     # only if offering GitHub sign-in
+      - key: CODEMAP_GITHUB_REDIRECT_URI
+        sync: false     # https://<your-api>/api/auth/github/callback
+      - key: CODEMAP_GITHUB_CLIENT_ID
+        sync: false
+      - key: CODEMAP_GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false     # optional; fine-grained, PUBLIC-repo read only
       - key: GEMINI_API_KEY
-        sync: false   # optional - offers AI narration for the guided tour
+        sync: false     # optional

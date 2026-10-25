@@ -148,20 +148,40 @@ def _db_path() -> str:
     return os.environ.get("CODEMAP_DB_PATH", DEFAULT_DB_PATH)
 
 
+# How long a writer waits for another writer's lock before giving up with
+# "database is locked". Writes here are tiny single-statement-first
+# transactions (one INSERT per analysis, one per session), so 10 s is
+# generous; it only matters when a burst of analyses finishes together.
+BUSY_TIMEOUT_SECONDS = 10
+
+
 def _connect() -> sqlite3.Connection:
     global _initialized_path
     path = _db_path()
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     is_new_file = not os.path.exists(path)
-    conn = sqlite3.connect(path, timeout=10)
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
     if is_new_file:
         # The DB holds encrypted GitHub tokens and private-repo graphs: owner-only.
+        # SQLite gives the -wal and -shm sidecar files the same mode as the
+        # main file, so this one chmod covers all three.
         try:
             os.chmod(path, 0o600)
         except OSError:
             pass  # e.g. Windows - best effort
+    # Per-connection: NORMAL is the documented-safe pairing with WAL (a power
+    # cut can lose the last commit, never corrupt the file) and avoids an
+    # fsync on every commit.
+    conn.execute("PRAGMA synchronous = NORMAL")
     if _initialized_path != path:
+        # WAL, for two reasons. (1) readers no longer block the writer or each
+        # other, which is what makes concurrent share-link views safe while an
+        # analysis is being saved. (2) Litestream replicates by tailing the
+        # WAL, so continuous backup cannot work in the default rollback-journal
+        # mode. The setting is stored in the file, so it survives restarts and
+        # restores; it is applied once per process rather than on every call.
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(_SCHEMA)
         _migrate(conn)
         conn.commit()

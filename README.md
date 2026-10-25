@@ -643,3 +643,32 @@ static host works for the frontend.
 - Built an AST-based static analysis engine for JavaScript/TypeScript repositories that extracts module dependencies and generates interactive codebase architecture graphs.
 - Implemented graph-based impact analysis, circular dependency detection, module centrality metrics, and deterministic code-change risk scoring using NetworkX.
 - Developed a React + FastAPI developer dashboard with repository exploration, dependency visualization, file-level metrics, architecture classification, and impact analysis.
+
+## Deployment: free tier + Litestream
+
+Free hosts (e.g. Render's free web service) give the container an **ephemeral disk**: it is
+wiped on every redeploy, restart and idle spin-down, and no persistent disk can be attached.
+CodeMap keeps SQLite (single process, no write concurrency) and adds
+[Litestream](https://litestream.io): it streams the database to an S3-compatible bucket
+(Backblaze B2, Cloudflare R2, MinIO) and `backend/docker/entrypoint.sh` restores it on boot.
+
+Order at startup (every step fails *closed*): restore if no local DB -> `PRAGMA integrity_check`
+-> on damage, set the file aside and try older points in time -> if a backup exists but cannot
+be read, **refuse to start** (booting empty would replicate an empty database over the history)
+-> run the server under `litestream replicate -exec`, which forwards SIGTERM and does a final sync.
+
+Measured behaviour (real Litestream 0.5.17, `backend/docker/e2e_replication.py`, folder and
+S3-compatible replicas, also as an unprivileged user):
+
+| Situation | Result |
+|---|---|
+| Disk wiped, restart | Same projects and graphs restored |
+| Damaged local DB | Detected, quarantined (`*.corrupt-<time>`), restored |
+| Bucket unreachable, no local DB | Refuses to start within the restore timeout (no hang, no empty DB) |
+| Hard kill (OOM) right after a save | Saves older than ~2 s survive; the last ~1-2 s can be lost |
+| Deploy overlap (old + new instance on one bucket path) | Backup stays valid, but **the old instance's writes in that window are silently dropped** |
+
+Known limits, stated plainly: overlap loss above (so `autoDeploy: false`; Litestream's lease
+protection exists only in its Go library, not the CLI); the in-memory rate limiter resets on
+every cold start; free hosts spin down when idle (about a minute to wake); never run two
+instances against one bucket path; not yet run on a real Render account or against real B2/R2.

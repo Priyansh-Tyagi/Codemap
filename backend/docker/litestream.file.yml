@@ -1,0 +1,11 @@
+# Same behaviour, but the "bucket" is a plain folder. For local/CI testing with
+# NO cloud account:  LITESTREAM_CONFIG=/srv/codemap/docker/litestream.file.yml
+# and LITESTREAM_FILE_REPLICA_PATH=/replica (mount a volume there to keep it).
+shutdown-sync-timeout: 20s
+
+dbs:
+  - path: ${CODEMAP_DB_PATH}
+    replica:
+      type: file
+      path: ${LITESTREAM_FILE_REPLICA_PATH}
+      sync-interval: 1s

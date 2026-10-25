@@ -1,0 +1,13 @@
+# Keep secrets, local state and bulk OUT of the build context (and so out of every layer).
+venv
+.venv
+**/__pycache__
+**/.pytest_cache
+**/.env
+**/.env.*
+!**/.env.example
+**/*.db
+**/*.db-*
+**/*.corrupt-*
+tests
+parser/node_modules

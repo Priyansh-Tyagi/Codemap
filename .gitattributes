@@ -1,0 +1,5 @@
+# Shell scripts run on Linux: CRLF line endings break them with a baffling "not found" error.
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+Dockerfile text eol=lf

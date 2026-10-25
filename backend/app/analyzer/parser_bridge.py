@@ -18,7 +18,26 @@ PARSER_SCRIPT = os.path.join(
 )
 
 
-NODE_MAX_HEAP_MB = 1536
+DEFAULT_NODE_MAX_HEAP_MB = 1536
+NODE_MAX_HEAP_MB = DEFAULT_NODE_MAX_HEAP_MB  # kept for older imports
+
+
+def node_max_heap_mb() -> int:
+    """
+    Heap ceiling for the parser subprocess, in MB. The default suits a normal
+    server or laptop. On a small container (Render's free tier has 512 MB for
+    EVERYTHING: Python, the replicator, the parser) 1.5 GB is a lie the OS
+    answers with an OOM kill, which also kills the process mid-backup. Set
+    CODEMAP_PARSER_MAX_HEAP_MB lower there. Bad values fall back to the
+    default rather than crashing; the range is clamped so a typo cannot
+    disable the cap (tiny) or defeat its purpose (huge).
+    """
+    raw = os.environ.get("CODEMAP_PARSER_MAX_HEAP_MB", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_NODE_MAX_HEAP_MB
+    return max(128, min(value, 8192))
 
 # The parser only needs to find `node` and a temp dir. Everything else in the
 # server's environment - GITHUB_TOKEN, the OAuth client secret, the Fernet
@@ -58,7 +77,7 @@ def parse_files(file_paths: list[str], timeout_seconds: int = 60) -> list[dict]:
         proc = subprocess.run(
             # Capped heap: a pathological file must not be able to take the
             # whole machine's memory, only fail its own parse.
-            ["node", f"--max-old-space-size={NODE_MAX_HEAP_MB}", os.path.abspath(PARSER_SCRIPT)],
+            ["node", f"--max-old-space-size={node_max_heap_mb()}", os.path.abspath(PARSER_SCRIPT)],
             input=payload,
             capture_output=True,
             text=True,

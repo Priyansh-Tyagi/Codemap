@@ -1,0 +1,30 @@
+# Litestream 0.5.x config for an S3-compatible bucket (Backblaze B2, Cloudflare R2, MinIO, ...).
+# Every ${VAR} is expanded from the environment at startup, so no secret is ever in the image.
+#
+# Required:  LITESTREAM_BUCKET, LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY
+# Provider:  LITESTREAM_ENDPOINT (e.g. s3.us-west-004.backblazeb2.com), LITESTREAM_REGION
+# Optional:  LITESTREAM_PATH (folder inside the bucket), LITESTREAM_FORCE_PATH_STYLE (true for MinIO)
+
+# On shutdown Litestream does one last sync. Render waits 30 s before SIGKILL by
+# default, and this wait must finish INSIDE that window, so it is set lower.
+shutdown-sync-timeout: 20s
+
+dbs:
+  - path: ${CODEMAP_DB_PATH}
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_BUCKET}
+      path: ${LITESTREAM_PATH}
+      endpoint: ${LITESTREAM_ENDPOINT}
+      region: ${LITESTREAM_REGION}
+      access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+      secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+      force-path-style: ${LITESTREAM_FORCE_PATH_STYLE}
+      sync-interval: 1s
+      # Small buffers: this container shares 512 MB with Python and Node.
+      # BYTES, not "5MB": Litestream reads "5MB" as 5,000,000, which is below S3's
+      # 5 MiB (5,242,880) minimum, so EVERY upload failed while the app kept running
+      # happily with no backup at all (found by running this config against an
+      # S3-compatible server). Backblaze B2's minimum (5 MB) is satisfied too.
+      part-size: 5242880
+      concurrency: 2
