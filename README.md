@@ -7,7 +7,7 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 **Live demo:** https://codemap-gold.vercel.app/  
 *The backend runs on a free tier that sleeps when idle, so the first request after a quiet period can take about a minute to wake. After that it is fast.*
 
-### CodeMap home page ![alt text](image.png)
+### CodeMap home page ![alt text](screenshots/image.png)
 
 ---
 
@@ -33,7 +33,7 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 | **Focus mode** on the FastAPI full-stack template: 5 of 152 files | **Risk score and change impact** for a selected file |
 | Circular dependency ![alt text](screenshots/image-3.png) | Guided tour ![alt text](screenshots/image-4.png) |
 | **A circular dependency**, with the cycle-closing edge drawn distinctly | **Guided tour**: a deterministic reading order |
-| Light theme ![alt text](screenshots/image-5.png) | Project overview [alt text](screenshots/image-6.png) |
+| Light theme ![alt text](screenshots/image-5.png) | Project overview [project overview](screenshots/image-6.png) |
 | **Light theme** (dark is the default on dark-mode systems) | **Project stats** and architecture breakdown |
 
 ---
