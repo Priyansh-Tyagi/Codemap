@@ -35,6 +35,26 @@ export async function getServerConfig() {
   }
 }
 
+const STORAGE_STATES = ["ok", "degraded", "disabled", "unmanaged"];
+const STORAGE_REASONS = ["provider_refused", "timeout", "unreachable", "corrupt"];
+
+/**
+ * Is the server awake, and is its backup storage usable? Answering at all proves
+ * the server is awake (a sleeping free host wakes on its first request), so this
+ * one call is both the warm-up and the source of the "backups offline" banner.
+ *
+ * Throws if the server can't be reached: the caller decides how to wait and retry.
+ * The reply is re-validated against fixed words even though the server already
+ * does that, so a misbehaving proxy can't put arbitrary text on the page.
+ */
+export async function getServerStatus({ timeoutMs = 90000 } = {}) {
+  const { data } = await api.get("/status", { timeout: timeoutMs });
+  const raw = data && typeof data === "object" ? data.storage : null;
+  const state = raw && STORAGE_STATES.includes(raw.state) ? raw.state : "unmanaged";
+  if (state !== "degraded") return { state };
+  return { state, reason: STORAGE_REASONS.includes(raw.reason) ? raw.reason : "unknown" };
+}
+
 /** source: { path } for a local filesystem path, or { githubUrl } for a GitHub repo URL. */
 export async function analyzeRepository(source) {
   const { data } = await api.post("/analyze", source);

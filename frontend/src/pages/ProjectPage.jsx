@@ -13,6 +13,7 @@ import FilterPanel from "../components/FilterPanel";
 import FocusControls from "../components/FocusControls";
 import ImpactPanel from "../components/ImpactPanel";
 import { getProjectGraph, getProjectSummary, getProjectTour } from "../services/api";
+import { useServerStatusContext, isStorageDegraded } from "../hooks/serverStatusContext";
 import { describeApiError } from "../utils/apiError";
 import { emptyFilters, computeVisibleNodeIds } from "../utils/filterNodes";
 import { LARGE_GRAPH_THRESHOLD, neighborhoodIds, pickFocusStart } from "../utils/focusNeighborhood";
@@ -30,6 +31,9 @@ export default function ProjectPage() {
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [filters, setFilters] = useState(emptyFilters());
   const [copied, setCopied] = useState(false);
+  // When backup storage is offline, a link made now dies with the next server
+  // restart. Say so exactly where the link is copied, not only in a banner.
+  const linkMayExpire = isStorageDegraded(useServerStatusContext());
   const [copyFailed, setCopyFailed] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
   // Focus mode: draw only the selected file's neighborhood. Large projects open in it.
@@ -215,6 +219,14 @@ export default function ProjectPage() {
             <Compass size={14} aria-hidden="true" />
             {tourOpen ? "Close tour" : "Guided tour"}
           </button>
+        )}
+        {status === "ready" && linkMayExpire && (
+          <span
+            className="hidden md:inline text-[12px] text-danger whitespace-nowrap"
+            title="Backup storage is offline, so this project may not survive a server restart."
+          >
+            link may not last
+          </span>
         )}
         {status === "ready" && (
           <button type="button" onClick={copyLink} className={ghost}>

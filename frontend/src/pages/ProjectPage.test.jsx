@@ -33,6 +33,7 @@ vi.mock("../services/auth", () => ({
 
 import { getProjectGraph, getProjectSummary } from "../services/api";
 import ProjectPage from "./ProjectPage";
+import { ServerStatusContext, DEFAULT_SERVER_STATUS } from "../hooks/serverStatusContext";
 
 const node = (id) => ({
   id, filePath: id, name: id.split("/").pop(), language: "javascript", linesOfCode: 10,
@@ -172,5 +173,51 @@ describe("ProjectPage", () => {
 
     await user.click(screen.getByText("Close guided tour"));
     expect(screen.queryByTestId("guided-tour")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("ProjectPage: link durability notice", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getProjectGraph.mockResolvedValue({ nodes: [node("a.js")], edges: [] });
+    getProjectSummary.mockResolvedValue(summary);
+  });
+
+  function renderWithStatus(status) {
+    return render(
+      <ServerStatusContext.Provider value={{ ...DEFAULT_SERVER_STATUS, ...status }}>
+        <MemoryRouter initialEntries={["/p/abc"]}>
+          <Routes>
+            <Route path="/p/:projectId" element={<ProjectPage />} />
+          </Routes>
+        </MemoryRouter>
+      </ServerStatusContext.Provider>
+    );
+  }
+
+  it("says the link may not last when backup storage is offline", async () => {
+    renderWithStatus({ phase: "ready", storage: { state: "degraded", reason: "timeout" } });
+    await screen.findByRole("button", { name: "Copy link" });
+    const note = screen.getByText("link may not last");
+    expect(note).toHaveAttribute("title", expect.stringMatching(/may not survive a server restart/));
+  });
+
+  it("says nothing when storage is healthy", async () => {
+    renderWithStatus({ phase: "ready", storage: { state: "ok" } });
+    await screen.findByRole("button", { name: "Copy link" });
+    expect(screen.queryByText("link may not last")).not.toBeInTheDocument();
+  });
+
+  it("says nothing without a provider (every other page test, local dev)", async () => {
+    renderAt("/p/abc");
+    await screen.findByRole("button", { name: "Copy link" });
+    expect(screen.queryByText("link may not last")).not.toBeInTheDocument();
+  });
+
+  it("does not claim anything before the server has actually answered", async () => {
+    renderWithStatus({ phase: "waking", storage: { state: "degraded", reason: "timeout" } });
+    await screen.findByRole("button", { name: "Copy link" });
+    expect(screen.queryByText("link may not last")).not.toBeInTheDocument();
   });
 });

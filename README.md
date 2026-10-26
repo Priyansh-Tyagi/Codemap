@@ -1,13 +1,15 @@
 # CodeMap
 
+[![Tests](https://github.com/Priyansh-Tyagi/Codemap/actions/workflows/tests.yml/badge.svg)](https://github.com/Priyansh-Tyagi/Codemap/actions/workflows/tests.yml)
+
 **See how a codebase fits together before you change it.**
 
 CodeMap maps every import in a JavaScript, TypeScript or Python repository into an interactive dependency graph. It finds circular dependencies, shows what a change could break, scores each file's risk from the graph itself, and walks you through an unfamiliar repo in a sensible reading order. Paste a public GitHub URL (or sign in to analyze your own private repos) and get results in seconds. It also runs as a CLI and a GitHub Action that fails a pull request when it introduces a new cycle.
 
-**Live demo:** https://codemap-gold.vercel.app/  
+**Live demo:** https://codemap-gold.vercel.app  
 *The backend runs on a free tier that sleeps when idle, so the first request after a quiet period can take about a minute to wake. After that it is fast.*
 
-### CodeMap home page ![alt text](screenshots/image.png)
+![CodeMap home page](docs/screenshots/01-home.png)
 
 ---
 
@@ -23,17 +25,18 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 - **Architecture classification** (Component, Service, Route, Test, Util, Hook, plus Django/Flask conventions) and filtering by category, risk level or folder.
 - **Shareable permanent links** (`/p/<id>`) backed by SQLite. Private-repo projects are visible only to the session that created them (a 404, never a 403, so existence isn't leaked).
 - **Sign in with GitHub** (optional): your own 5,000/hour API quota and access to your private repos.
+- **Honest about free hosting**: a sleeping server is woken the moment the page opens, with a "Waking the server" message and a timer instead of a frozen page; and if backup storage is offline, a banner says so and the share-link button warns that the link may not last.
 - **Light and dark themes**, file tree with search, imports/symbols panel.
 
 ### Screenshots
 
 | | |
 |---|---|
-| Focus mode on a large project ![alt text](screenshots/image-1.png) | File details and change impact ![alt text](screenshots/image-2.png) |
+| ![Focus mode on a large project](docs/screenshots/02-focus-mode.png) | ![File details and change impact](docs/screenshots/03-impact.png) |
 | **Focus mode** on the FastAPI full-stack template: 5 of 152 files | **Risk score and change impact** for a selected file |
-| Circular dependency ![alt text](screenshots/image-3.png) | Guided tour ![alt text](screenshots/image-4.png) |
+| ![Circular dependency](docs/screenshots/04-cycle.png) | ![Guided tour](docs/screenshots/05-tour.png) |
 | **A circular dependency**, with the cycle-closing edge drawn distinctly | **Guided tour**: a deterministic reading order |
-| Light theme ![alt text](screenshots/image-5.png) | Project overview ![Project overview](screenshots/image-6.png) |
+| ![Light theme](docs/screenshots/06-light-theme.png) | ![Project overview](docs/screenshots/07-overview.png) |
 | **Light theme** (dark is the default on dark-mode systems) | **Project stats** and architecture breakdown |
 
 ---
@@ -166,7 +169,7 @@ flowchart LR
 
 **The problem:** a free web service has an *ephemeral* disk, wiped on every redeploy, restart and idle spin-down. SQLite alone would lose every saved project and share link.
 
-**The fix:** [Litestream](https://litestream.io) replicates the database to an S3-compatible bucket, and the container entrypoint (`backend/docker/entrypoint.sh`) restores it on boot. Every step fails *closed*: restore if there is no local DB, run `PRAGMA integrity_check`, quarantine and fall back to older points in time if damaged, and **refuse to start** if a backup exists but can't be read (booting empty would replicate an empty database over the history).
+**The fix:** [Litestream](https://litestream.io) replicates the database to an S3-compatible bucket, and the container entrypoint (`backend/docker/entrypoint.sh`) restores it on boot. The order is: restore if there is no local DB, run `PRAGMA integrity_check`, quarantine and fall back to older points in time if damaged, then replicate. If a backup exists but cannot be used (provider refusing requests, unreachable, timed out, or no usable copy), the app **starts degraded instead of refusing**: replication is OFF for that run, the app uses its own scratch file (`codemap.db.degraded`), and the bucket is never written to. The safety rule is *never replicate a fresh database over existing history*, not *never start*: a second timeline written to the same path displaces the old one (measured below), and with a persistent volume a fresh database left at the real path would be replicated by the next start. The state is published to the UI (`GET /api/status`), and the next cold start retries the restore on its own, at no extra cost.
 
 **Measured behaviour** (real Litestream 0.5.17, `backend/docker/e2e_replication.py`, against a folder replica and an S3-compatible server, including as an unprivileged user):
 
@@ -174,8 +177,10 @@ flowchart LR
 |---|---|
 | Disk wiped, restart | Same projects and graphs restored |
 | Damaged local DB | Detected, quarantined, restored |
-| Bucket unreachable, no local DB | Refuses to start within the restore timeout (no hang, no empty DB) |
+| Bucket unreachable, no local DB | Starts degraded within the restore timeout (bounded, never an endless silent retry); no replication process runs; `/api/status` says `degraded` |
 | Hard kill (e.g. OOM) right after a save | Saves older than ~2 s survive; the last 1-2 s can be lost |
+| Provider answers 403 (e.g. a free-tier daily request cap) | Starts degraded, explains the likely cause in the log; the provider saw **zero writes**; analysis keeps working |
+| A degraded run, then a normal start | The real DB path was never touched, the original backup restores, what was saved while degraded is gone (as documented), and the backup still restores cleanly |
 | Deploy overlap (old and new instance, one bucket path) | Backup stays valid, but **the old instance's writes in that window are silently dropped** |
 
 Verified on the live deployment: restore after the service sleeps, restore after a manual redeploy, and the full GitHub OAuth round trip with cross-site cookies. Because of the overlap result, **auto-deploy is turned off** and deploys are manual.
@@ -187,6 +192,17 @@ docker build -t codemap-api:dev .
 docker run --rm -p 8000:8000 -v codemap-data:/data codemap-api:dev
 ```
 Set the `LITESTREAM_*` variables (see `render.yaml` and `backend/app/.env.example`) to enable replication. The image runs as a non-root user, installs hash-locked Python dependencies, verifies the Litestream binary by SHA-256, and caps the Node parser's heap (`CODEMAP_PARSER_MAX_HEAP_MB=192`) so a huge repo fails cleanly instead of OOM-killing the container. Peak memory measured under a 512 MB limit while analyzing the FastAPI template: about 267 MiB, no OOM kill.
+
+**Free-tier request caps (an incident, and the fix).** Backblaze B2's free tier allows 2,500 "Class C" transactions a day, and listing files counts. Litestream's default background timers list the bucket constantly: measured at about **650 list requests an hour** on an idle, awake service. The cap was hit, B2 answered 403 to everything (including the restore at startup), and the service could not boot. The entrypoint did the right thing and refused to start empty, so no backups were touched. The fix, measured side by side against an S3-compatible server for 15 idle minutes with identical data restored from both:
+
+| | List calls in 15 min | Per hour, awake | If awake 24 h/day |
+|---|---|---|---|
+| Litestream defaults | 163 | about 650 | about 15,600 |
+| Tuned timers (`docker/litestream.yml`) | 17 (12 at startup) | about 30 | about 720 |
+
+Backups, restores and the 1-2 s replication lag are unchanged; only compaction and cleanup of old files run less often. The values are literal in the YAML (not `${ENV}`) so a restore run by hand during an outage still parses it, and tests pin them. A restore itself costs about 33 requests, so cold starts and deploys count too.
+
+**If the provider ever refuses requests (runbook):** nothing needs doing to keep the site up: it starts degraded by itself and shows the banner (new projects are not backed up and vanish on restart; the old backup is untouched). When the cap resets (B2: midnight UTC) or is raised, **Manual Deploy** or let the next idle sleep pass: the next cold start restores the backup. `LITESTREAM_ENABLED=false` still exists to switch replication off on purpose. Never point `LITESTREAM_PATH` at a new folder to "fix" an outage: that starts an empty history.
 
 `render.yaml` is the Render blueprint. Frontend: set `VITE_API_BASE_URL` (it is baked in at build time) and deploy `frontend/` to any static host; security headers ship in `vercel.json` and `public/_headers`.
 
@@ -224,11 +240,13 @@ Also in place: Origin check on state-changing requests, locked-down CORS (wildca
 
 | Suite | Count | Run |
 |---|---|---|
-| Backend (pytest) | 415 | `cd backend && python -m pytest tests\ -q` |
-| Frontend (Vitest + Testing Library) | 103 | `cd frontend && npm test` |
-| Replication drill (real Litestream) | 20 checks | `python backend/docker/e2e_replication.py` (Linux or inside the image) |
+| Backend (pytest) | 450 | `cd backend && python -m pytest tests\ -q` |
+| Frontend (Vitest + Testing Library) | 152 | `cd frontend && npm test` |
+| Replication drill (real Litestream) | 34 checks | `python backend/docker/e2e_replication.py` (Linux or inside the image) |
 
 The backend suite covers the scanner, both parsers and resolvers, the graph engine, risk scoring, the GitHub fetcher (mocked, network-independent), SQLite persistence across real process boundaries, OAuth and private-repo access control across every read route, the CLI as a subprocess, the guided tour, and the deployment files themselves. Tests are isolated from the developer's environment: secrets and limits are stripped, and any un-mocked real HTTP call raises.
+
+Both suites run on every pull request and push to `main` (`.github/workflows/tests.yml`), installing from the same hash-locked file the Docker image uses.
 
 Not covered by automated tests: React Flow rendering is stubbed in jsdom, so the canvas is checked in a real browser, and there is no browser-automation suite yet.
 
@@ -246,6 +264,8 @@ Most of the interesting engineering came from real repositories, not the demos:
 - **Test files were classified as Routes** (first-match-wins folder rules). Test detection now runs first.
 - **A docs-only repo reported "Unexpected tarball structure"**, blaming GitHub for what was really "nothing to analyze".
 - **The S3 backup config uploaded nothing.** `part-size: 5MB` is read as 5,000,000 bytes, below S3's 5 MiB minimum, so every upload failed while the app ran normally. Found only by running the config against an S3-compatible server; now pinned by a test.
+- **The service took itself down with its own backups.** Litestream's default timers listed the bucket ~650 times an hour, the free provider's daily cap tripped, and every request (including the startup restore) got a 403. Found in production; fixed by measuring each timer's cost, slowing them ~20x, and teaching the entrypoint to explain a 403 and back off instead of looping.
+- **"Fail closed" was too blunt.** After the cap incident the entrypoint refused to start on an unreadable backup, which kept the data safe but took the whole site down. The real invariant is "never replicate a fresh database over existing history", so it now starts degraded with replication off. Building that exposed a second hazard: with a persistent volume, a fresh database left at the real path would look healthy to the next start and be replicated over the backup, so the degraded run uses its own file, with a drill scenario that proves the original backup restores afterwards.
 - **The app failed its own platform's health check.** Host-header protection rejected the platform's private-address probe with a 400. Fixed by exempting exactly `GET`/`HEAD /api/health`, with tests that every other path stays strict.
 
 ---
@@ -260,6 +280,8 @@ Most of the interesting engineering came from real repositories, not the demos:
 - Large repos parse slowly (a 395-file Python+JS repo took 13 s locally, almost all in the Node parser), and analysis is one blocking request today.
 
 **Deployment limits**
+- Free-tier request caps are real: the B2 free tier allows 2,500 list-type calls a day. Idle cost is now ~30 an hour awake, plus ~33 per restore; watch B2's Caps & Alerts page after deploys.
+- The storage banner reflects the state at **startup**. If replication fails later in a run (for example a cap hit mid-session) nothing tells the UI yet.
 - Single instance only; free-tier cold starts take about a minute; replication lag means a hard kill can lose the last 1-2 seconds of writes.
 - Free instances may have far less CPU than a laptop, so large analyses can be noticeably slower than the local numbers above.
 
@@ -272,6 +294,7 @@ Most of the interesting engineering came from real repositories, not the demos:
 
 ## Roadmap
 
+- Report replication health during a run (Litestream exposes metrics), so the banner also covers failures after startup.
 - Pin the frontend CSP `connect-src` to the API origin.
 - Background analysis with progress, replacing the single blocking request.
 - A small Playwright browser suite.
@@ -287,7 +310,7 @@ backend/
   app/          FastAPI app: analyzer/ (scan, parse, resolve), graph/ (engine, tour), services/ (store, security), api/
   parser/       Node + Babel import extractor (one-shot subprocess)
   docker/       entrypoint, Litestream configs, replication drill
-  tests/        415 tests
+  tests/        450 tests
   Dockerfile
 frontend/       React + Vite + Tailwind v4 + React Flow + dagre (Geist / Geist Mono)
 examples/       demo repos and edge-case fixtures

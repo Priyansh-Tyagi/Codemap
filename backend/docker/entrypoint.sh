@@ -8,10 +8,15 @@
 #      restore the newest copy from the replica.
 #   2. Verify the file with SQLite's own integrity check. If it is damaged,
 #      set it aside and fall back to older points in time.
-#   3. If a backup EXISTS but cannot be restored cleanly, REFUSE TO START.
-#      Booting empty would make Litestream replicate an empty database over the
-#      good history, turning a recoverable problem into permanent data loss.
-#   4. Only then start Litestream, which in turn runs the web server (-exec),
+#   3. If a backup EXISTS but cannot be restored cleanly (provider refusing
+#      requests, unreachable, timed out, or no usable copy), run DEGRADED: start
+#      the app with replication OFF and leave the bucket untouched. The safety
+#      property is "never replicate a fresh database over existing history", NOT
+#      "never start": a second timeline written to the same path displaces the
+#      old one (measured), so replicating from an empty start could bury the
+#      backup. Degraded mode ends at the next cold start, which retries the
+#      restore on its own. The state is published for the UI (see write_status).
+#   4. Otherwise start Litestream, which in turn runs the web server (-exec),
 #      forwards stop signals to it, and does a final sync on shutdown.
 set -eu
 umask 077   # every file we create (DB, -wal, -shm, restore output) is owner-only
@@ -31,6 +36,24 @@ die() { printf '[entrypoint] FATAL: %s\n' "$*" >&2; exit 1; }
 # only acceptable when the container is reachable solely through that proxy.
 export FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-*}"
 
+# Where the app reads the storage state the UI shows (GET /api/status). Rewritten
+# on EVERY start, so a stale file from an earlier run can never be believed.
+export CODEMAP_STORAGE_STATUS_FILE="${CODEMAP_STORAGE_STATUS_FILE:-/tmp/codemap-storage.json}"
+
+# write_status <state> [reason]. Only fixed words go in (no provider text), so
+# nothing attacker-influenced ever reaches the page.
+write_status() {
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ -n "${2:-}" ]; then
+    body="{\"state\":\"$1\",\"reason\":\"$2\",\"since\":\"$ts\"}"
+  else
+    body="{\"state\":\"$1\",\"since\":\"$ts\"}"
+  fi
+  { printf '%s\n' "$body" > "$CODEMAP_STORAGE_STATUS_FILE.tmp" && mv "$CODEMAP_STORAGE_STATUS_FILE.tmp" "$CODEMAP_STORAGE_STATUS_FILE"; } \
+    || log "could not write $CODEMAP_STORAGE_STATUS_FILE (the UI will not show the storage state)"
+  return 0
+}
+
 # Defaults so the ${VAR} expansion in litestream.yml never hits an unset name.
 export LITESTREAM_PATH="${LITESTREAM_PATH:-codemap}"
 export LITESTREAM_ENDPOINT="${LITESTREAM_ENDPOINT:-}"
@@ -44,6 +67,7 @@ APP_CMD="uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --prox
 
 if [ "${LITESTREAM_ENABLED:-false}" != "true" ]; then
   log "WARNING: replication is OFF (LITESTREAM_ENABLED is not 'true'). Data lives only on this container's disk."
+  write_status disabled
   exec $APP_CMD
 fi
 
@@ -67,14 +91,45 @@ RESTORE_TIMEOUT="${LITESTREAM_RESTORE_TIMEOUT:-120}"
 restore_to() {
   out="$1"; shift
   rm -f "$out" "$out-wal" "$out-shm"
-  if timeout "$RESTORE_TIMEOUT" litestream restore -config "$CONFIG" -if-replica-exists "$@" -o "$out" "$DB"; then
+  rlog="$out.log"
+  if timeout "$RESTORE_TIMEOUT" litestream restore -config "$CONFIG" -if-replica-exists "$@" -o "$out" "$DB" >"$rlog" 2>&1; then
+    cat "$rlog"; rm -f "$rlog"
     return 0
   else
     rc=$?
-    if [ "$rc" -eq 124 ]; then log "restore timed out after ${RESTORE_TIMEOUT}s"; fi
-    rm -f "$out" "$out-wal" "$out-shm"
+    cat "$rlog"
+    FAIL_REASON=unreachable
+    if [ "$rc" -eq 124 ]; then FAIL_REASON=timeout; log "restore timed out after ${RESTORE_TIMEOUT}s"; fi
+    # A provider that answers 403 / "cap exceeded" is NOT a bad key or a bad bucket
+    # when earlier deploys worked: it is usually a free-tier daily request cap.
+    if grep -qiE 'cap exceeded|AccessDenied|status code: 403|StatusCode: 403' "$rlog"; then
+      FAIL_REASON=provider_refused
+      log "HINT: the storage provider refused the request (403). If this worked before, a daily request cap is the likely cause."
+      log "HINT: Backblaze B2: Account > Caps & Alerts, check Class C (list) transactions; the counter resets at midnight UTC. Raise the cap or wait; the app keeps running without backups meanwhile."
+    fi
+    rm -f "$out" "$out-wal" "$out-shm" "$rlog"
     return "$rc"
   fi
+}
+
+# Backup storage cannot be used right now. Start the app anyway, but WITHOUT
+# replication, and leave the bucket untouched. No `litestream replicate` may ever
+# appear in this function (a test pins that): replicating from an empty start is
+# the one thing that could destroy the existing history.
+#
+# The app runs on its OWN file ($DB.degraded), never on $DB. On a host with a
+# persistent volume, a fresh database left at $DB would look "healthy and local" to
+# the next start, which would then replicate it over the real history: the same
+# timeline-displacement mistake, one restart later. With a separate file, $DB stays
+# absent and the next start restores from the backup as it should.
+degrade() {  # degrade <reason code> <what happened>
+  write_status degraded "$1"
+  log "DEGRADED ($1): $2"
+  rm -f "$DB.degraded" "$DB.degraded-wal" "$DB.degraded-shm"
+  export CODEMAP_DB_PATH="$DB.degraded"
+  log "starting the app WITHOUT replication, on $DB.degraded; the existing backup is untouched."
+  log "projects saved during this run will not survive a restart; the next cold start retries the restore."
+  exec $APP_CMD
 }
 
 healthy() {
@@ -100,7 +155,7 @@ fi
 if [ ! -e "$DB" ]; then
   log "no local database: restoring newest copy from the replica"
   restore_to "$DB.restoring" \
-    || die "could not read the replica. NOT starting: an empty database would be replicated over the existing backup history. Fix connectivity/credentials and redeploy."
+    || degrade "${FAIL_REASON:-unreachable}" "could not read the backup"
   if [ -e "$DB.restoring" ]; then mv "$DB.restoring" "$DB"; fi
 
   if [ -e "$DB" ]; then
@@ -119,7 +174,7 @@ if [ ! -e "$DB" ]; then
         fi
         if [ -e "$DB" ]; then quarantine; fi
       done
-      [ "$recovered" = "true" ] || die "replica exists but no usable copy found. NOT starting (would overwrite history). Restore manually: litestream restore -timestamp <T> ..."
+      [ "$recovered" = "true" ] || degrade corrupt "a backup exists but no usable copy was found (restore manually: litestream restore -timestamp <T> ...)"
     fi
   else
     log "replica is empty: first boot, starting a fresh database"
@@ -127,4 +182,5 @@ if [ ! -e "$DB" ]; then
 fi
 
 log "starting replication + server"
+write_status ok
 exec litestream replicate -config "$CONFIG" -exec "$APP_CMD"

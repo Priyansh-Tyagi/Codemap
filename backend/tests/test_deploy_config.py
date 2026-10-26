@@ -53,9 +53,10 @@ def test_entrypoint_is_valid_shell_and_keeps_its_safety_rules():
     text = read("docker", "entrypoint.sh")
     assert "umask 077" in text                       # DB, -wal, -shm owner-only
     assert "-if-replica-exists" in text              # first boot must not be an error
-    assert "NOT starting" in text                    # fail closed rather than replicate an empty DB
+    assert "degrade()" in text                       # an unusable backup degrades; it never replicates an empty DB
     assert "timeout " in text                        # unreachable bucket must not hang forever
     assert "exec litestream replicate" in text       # signals reach litestream (PID 1)
+    assert "write_status ok" in text                 # the UI is told replication is running
 
 
 def test_dockerfile_bakes_in_no_secrets_and_runs_unprivileged():
@@ -72,3 +73,81 @@ def test_dockerignore_keeps_secrets_and_databases_out_of_the_image():
     lines = {l.strip() for l in read(".dockerignore").splitlines()}
     for must in ("**/.env", "**/*.db", "**/*.db-*", "venv"):
         assert must in lines, must
+
+
+# --- B2 free-tier incident: background timers must stay slow ---------------------------
+# Litestream's default timers made ~650 LIST requests an hour on an idle service
+# (measured). Backblaze B2's free tier allows 2,500 list-type requests a DAY; the cap
+# was hit, B2 answered 403 to everything (including the restore at startup) and the
+# service could not boot. These tests pin the slowed-down values.
+
+def _to_minutes(value):
+    m = re.fullmatch(r"(\d+)(s|m|h)", value)
+    assert m, f"unrecognised duration {value!r}"
+    return int(m.group(1)) * {"s": 1 / 60, "m": 1, "h": 60}[m.group(2)]
+
+
+def _yml_levels():
+    return [_to_minutes(v) for v in re.findall(r"^\s*-\s*interval:\s*(\d+[smh])\b", read("docker", "litestream.yml"), re.M)]
+
+
+def _yml_value(key):
+    m = re.search(rf"^{re.escape(key)}:\s*(\d+[smh])\b", read("docker", "litestream.yml"), re.M)
+    assert m, f"{key} is not set to a literal duration in litestream.yml"
+    return _to_minutes(m.group(1))
+
+
+def test_litestream_timers_are_slow_and_literal():
+    # Literal values on purpose: a restore run by hand during an outage has no
+    # entrypoint to export variables, and ${UNSET} expands to an empty string.
+    text = read("docker", "litestream.yml")
+    assert not re.search(r"interval:\s*\$\{|l0-retention[\w-]*:\s*\$\{", text)
+    levels = _yml_levels()
+    assert levels[0] >= 10      # Litestream default: 30 s
+    assert levels[1] >= 60      # Litestream default: 5 min
+    assert _yml_value("l0-retention-check-interval") >= 10   # default: 15 s
+    assert _yml_value("l0-retention") >= _yml_value("l0-retention-check-interval")
+
+
+def test_estimated_idle_list_rate_fits_the_b2_free_daily_cap():
+    # Measured: ~5 LIST requests per 10 minutes at 10m/1h/30m/10m. Scale by the
+    # first compaction interval so loosening a timer without thought fails here.
+    per_10_min = 5 * (10 / _yml_levels()[0])
+    per_day_awake_24h = per_10_min * 6 * 24
+    assert per_day_awake_24h < 1000, "an always-awake service would use over 40% of B2's free daily cap on idling alone"
+
+
+def _function_body(text, name):
+    m = re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.M | re.S)
+    assert m, f"{name}() not found in entrypoint.sh"
+    return m.group(0)
+
+
+def test_degraded_mode_can_never_replicate():
+    # The one thing that could destroy existing backup history is replicating a
+    # fresh database over it. If this ever fails, someone put replication in the
+    # degraded path.
+    body = _function_body(read("docker", "entrypoint.sh"), "degrade")
+    assert "replicate" not in body
+    assert "exec $APP_CMD" in body
+    assert "write_status degraded" in body
+
+
+def test_every_unusable_backup_path_degrades_instead_of_refusing_or_replicating():
+    text = read("docker", "entrypoint.sh")
+    assert 'degrade "${FAIL_REASON:-unreachable}"' in text    # restore failed (403, timeout, unreachable)
+    assert "degrade corrupt" in text                          # a backup exists but nothing usable
+    assert "NOT starting" not in text                         # the old refuse-to-start policy is gone
+
+
+def test_status_file_only_ever_gets_fixed_words():
+    text = read("docker", "entrypoint.sh")
+    assert 'FAIL_REASON=provider_refused' in text and 'FAIL_REASON=timeout' in text
+    # provider text (rlog) is grepped, never written into the status file
+    body = _function_body(text, "write_status")
+    assert "rlog" not in body
+
+
+def test_entrypoint_explains_provider_refusals():
+    text = read("docker", "entrypoint.sh")
+    assert "HINT" in text and "daily request cap" in text

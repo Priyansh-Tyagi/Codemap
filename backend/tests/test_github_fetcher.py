@@ -176,3 +176,54 @@ def test_unsafe_tarball_path_is_rejected(tmp_path):
     with patch("analyzer.github_fetcher.requests.get", side_effect=[metadata_resp, tarball_resp]):
         with pytest.raises(GitHubFetchError, match="unsafe path"):
             fetch_github_repo("https://github.com/owner/repo")
+
+
+# --- docs-only / config-only repositories ------------------------------
+# Regression: fastapi-best-practices is essentially a README. The extractor only
+# unpacks source + config files, so nothing is extracted, no top-level folder
+# exists, and the user got "Unexpected tarball structure from GitHub" - blaming
+# GitHub for what is really "there is nothing here to analyze".
+
+def _tarball_with(files, top_dir="owner-repo-abc123"):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name=f"{top_dir}/{name}")
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
+def _fetch_with(files):
+    metadata_resp = _make_fake_response(200, json_data={"size": 10, "default_branch": "main"})
+    tarball_resp = _make_fake_response(200, content_bytes=_tarball_with(files))
+    with patch("analyzer.github_fetcher.requests.get", side_effect=[metadata_resp, tarball_resp]):
+        return fetch_github_repo("https://github.com/owner/repo")
+
+
+def test_docs_only_repo_gets_an_honest_message_not_a_tarball_error():
+    with pytest.raises(GitHubFetchError) as err:
+        _fetch_with({"README.md": b"# best practices\n", "docs/guide.md": b"text\n"})
+    msg = str(err.value)
+    assert "Unexpected tarball structure" not in msg
+    assert "JavaScript, TypeScript or Python" in msg
+
+
+def test_docs_only_failure_leaves_no_temp_files_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    with pytest.raises(GitHubFetchError):
+        _fetch_with({"README.md": b"# nothing to see\n"})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_two_top_level_directories_is_still_reported_as_a_bad_tarball(monkeypatch):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name in ("a-1/x.js", "b-2/y.js"):
+            info = tarfile.TarInfo(name=name); info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+    metadata_resp = _make_fake_response(200, json_data={"size": 10, "default_branch": "main"})
+    tarball_resp = _make_fake_response(200, content_bytes=buffer.getvalue())
+    with patch("analyzer.github_fetcher.requests.get", side_effect=[metadata_resp, tarball_resp]):
+        with pytest.raises(GitHubFetchError, match="Unexpected tarball structure"):
+            fetch_github_repo("https://github.com/owner/repo")

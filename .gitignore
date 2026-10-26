@@ -15,3 +15,11 @@ venv/
 *.db-journal
 *.db-wal
 *.db-shm
+*.db.corrupt-*
+*.corrupt-*
+
+# Secrets and local-only files: never commit these
+.env.*
+!.env.example
+*.zip
+.vercel/

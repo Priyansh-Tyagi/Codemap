@@ -7,11 +7,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from api import projects, files, graph, auth
-from services import ratelimit, security
+from services import ratelimit, security, storage_status
 
 # Loads backend/app/.env if it exists (copy .env.example to .env and fill it
 # in - see README "GitHub sign-in"). Anchored to this file's own directory,
@@ -120,7 +119,7 @@ _hosts = security.allowed_hosts()
 if _hosts:
     # Optional defense against Host-header tricks (e.g. poisoned redirect URLs):
     # set CODEMAP_ALLOWED_HOSTS=api.example.com in a deployment.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_hosts)
+    app.add_middleware(security.HostCheckExceptHealth, allowed_hosts=_hosts)
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
@@ -131,6 +130,17 @@ app.include_router(graph.router, prefix="/api")
 @app.get("/api/health")
 def health_check() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/status")
+def server_status() -> dict:
+    """Is the server up, and is its backup storage usable? Drives the UI banners.
+
+    Answering at all means the server is awake; the frontend uses this one call
+    both as its warm-up (a sleeping free host wakes on the first request) and to
+    learn whether projects saved now will survive a restart.
+    """
+    return {"status": "ok", "storage": storage_status.read_storage_status()}
 
 
 @app.get("/api/config")

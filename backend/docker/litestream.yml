@@ -9,6 +9,24 @@
 # default, and this wait must finish INSIDE that window, so it is set lower.
 shutdown-sync-timeout: 20s
 
+# BACKGROUND TIMERS - the reason this file is tuned.
+# Every timer below lists the bucket each time it fires. With Litestream's defaults
+# (L0 retention check every 15 s, compaction every 30 s / 5 m / 1 h) an idle,
+# awake service made about 650 LIST requests an hour (measured, 15 minutes against
+# an S3-compatible server). Backblaze B2's free tier allows 2,500 "Class C" requests
+# a day, LIST included: the cap was hit, B2 answered 403 to everything (including the
+# restore at startup) and the service could not boot. These values cut the idle rate
+# to about 30 an hour (measured, same test) and restored the same data.
+# Trade-off: compaction and cleanup of old files are slower; backups, restore and
+# the 1-2 s replication lag are unchanged.
+# These are LITERAL values, not ${ENV} references, on purpose: a restore run by hand
+# during an outage (no entrypoint, no exported variables) must still parse this file.
+levels:
+  - interval: 10m     # Litestream default: 30s
+  - interval: 1h      # Litestream default: 5m, plus a third level at 1h
+l0-retention: 30m                 # Litestream default: 5m
+l0-retention-check-interval: 10m  # Litestream default: 15s
+
 dbs:
   - path: ${CODEMAP_DB_PATH}
     replica:

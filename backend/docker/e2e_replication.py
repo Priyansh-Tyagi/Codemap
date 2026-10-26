@@ -8,7 +8,9 @@ Run on a Linux box:     CODEMAP_HOME=/path/with/app+parser+docker  python e2e_re
 Scenarios (each maps to a risk we were worried about):
   S1  cold start + first boot            S2  graceful stop forwards SIGTERM, final sync
   S3  host disk wiped -> restore         S4  damaged local DB -> quarantine + restore
-  S5  replica unreachable -> REFUSES to start (fail closed)
+  S5  replica unreachable -> starts DEGRADED (no replication), says so via /api/status
+  S9  provider answers 403 (free-tier cap) -> degraded, and the provider sees ZERO writes
+  S10 a degraded run never touches the real DB path or the backup history
   S6  DB / -wal / -shm are owner-only    S7  data-loss window on a hard kill (stale-data risk)
   S8  two instances overlap (deploy)     -> measures what really happens
 """
@@ -60,6 +62,7 @@ def env_for(port, db, replica=REPLICA, extra=None):
 
 
 def start(name, port, db, **kw):
+    kw["extra"] = dict(kw.get("extra") or {}, CODEMAP_STORAGE_STATUS_FILE=os.path.join(WORK, f"{name}.status.json"))
     log = open(os.path.join(WORK, f"{name}.log"), "w")
     p = subprocess.Popen(["sh", os.path.join(HOME, "docker", "entrypoint.sh")],
                          env=env_for(port, db, **kw), stdout=log, stderr=subprocess.STDOUT,
@@ -121,7 +124,7 @@ def hard_kill(p):
 
 
 def wipe_db(db):
-    for s in ("", "-wal", "-shm", "-litestream"):
+    for s in ("", "-wal", "-shm", "-litestream", ".degraded", ".degraded-wal", ".degraded-shm"):
         path = db + s
         if os.path.isdir(path):
             shutil.rmtree(path, ignore_errors=True)
@@ -145,6 +148,28 @@ def procs_left():
         if "main:app" in toks and any(os.path.basename(t) == "uvicorn" for t in toks):
             found.append(name)
     return found
+
+
+def running(*words):
+    """True if some process has every word as an argv entry (by basename). Reads /proc."""
+    for name in os.listdir("/proc"):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            toks = open(f"/proc/{name}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace").split()
+        except OSError:
+            continue
+        if toks and os.path.basename(toks[0]) not in ("sh", "bash", "dash") and \
+                all(any(os.path.basename(t) == w for t in toks) for w in words):
+            return True
+    return False
+
+
+def status(port):
+    try:
+        return http(port, "/api/status", timeout=10)
+    except Exception:
+        return {}
 
 
 def mode(path):
@@ -234,7 +259,7 @@ check("data intact after recovery", n == n1, f"nodes={n}")
 stop(p)
 
 # ---------------------------------------------------------------- S5
-print("S5 replica unreachable + no local DB -> must REFUSE to start")
+print("S5 replica unreachable + no local DB -> must start DEGRADED, not refuse and not replicate")
 wipe_db(DB)
 bad = {"LITESTREAM_CONFIG": os.path.join(HOME, "docker", "litestream.yml"),
        "LITESTREAM_BUCKET": "nope", "LITESTREAM_ENDPOINT": "http://127.0.0.1:1",
@@ -243,16 +268,80 @@ bad = {"LITESTREAM_CONFIG": os.path.join(HOME, "docker", "litestream.yml"),
        "LITESTREAM_RESTORE_TIMEOUT": "15"}
 t = time.time()
 p = start("s5", 18002, DB, extra=bad)
-try:
-    rc = p.wait(timeout=90)
-except subprocess.TimeoutExpired:
-    os.killpg(p.pid, signal.SIGKILL); rc = "TIMEOUT"
+up = wait_up(18002)
 lt = logtext(p)
-check("exits non-zero", rc not in (0, None, "TIMEOUT"), f"rc={rc} after {time.time()-t:.0f}s")
-check("says it will not start empty", "NOT starting" in lt)
-check("gives up in bounded time instead of hanging", "timed out" in lt and time.time() - t < 60, f"{time.time()-t:.0f}s")
-check("no server was started, no half-restored file left behind",
-      not procs_left() and not os.path.exists(DB) and not os.path.exists(DB + ".restoring"))
+st = status(18002).get("storage", {})
+check("the app comes up anyway, in bounded time", bool(up) and time.time() - t < 75, f"{time.time()-t:.0f}s")
+check("/api/status says degraded, with a fixed reason code",
+      st.get("state") == "degraded" and st.get("reason") in ("timeout", "unreachable"), str(st))
+check("restore was bounded, not an endless silent retry", "timed out" in lt)
+check("NO replication process is running", not running("litestream", "replicate"))
+pid = analyze(18002) if up else None
+check("analysis still works while degraded", bool(pid and nodes(18002, pid)))
+check("the real DB path was never created (degraded runs on its own file)",
+      not os.path.exists(DB) and os.path.exists(DB + ".degraded"))
+stop(p)
+check("clean stop, nothing orphaned", not procs_left())
+
+
+# ---------------------------------------------------------------- S9
+print("S9 provider answers 403 'cap exceeded' (the B2 free-tier incident)")
+import http.server as _hs   # NOT 'import http.server': that would shadow the http() helper
+import threading
+class Deny(_hs.BaseHTTPRequestHandler):
+    reads = 0
+    writes = 0   # PUT / POST / DELETE: anything that could change the bucket
+    def _deny(self):
+        if self.command in ("GET", "HEAD"): Deny.reads += 1
+        else: Deny.writes += 1
+        body = b'<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Transaction cap exceeded</Message></Error>'
+        self.send_response(403); self.send_header("Content-Type", "application/xml")
+        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    do_GET = do_PUT = do_HEAD = do_POST = do_DELETE = _deny
+    def log_message(self, *a): pass
+srv = _hs.ThreadingHTTPServer(("127.0.0.1", 0), Deny)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+deny_env = {"LITESTREAM_CONFIG": os.path.join(HOME, "docker", "litestream.yml"),
+            "LITESTREAM_BUCKET": "capped", "LITESTREAM_ENDPOINT": f"http://127.0.0.1:{srv.server_address[1]}",
+            "LITESTREAM_ACCESS_KEY_ID": "x", "LITESTREAM_SECRET_ACCESS_KEY": "y",
+            "LITESTREAM_REGION": "us-east-1", "LITESTREAM_FORCE_PATH_STYLE": "true",
+            "LITESTREAM_RESTORE_TIMEOUT": "30"}
+wipe_db(DB)
+p = start("s9", 18004, DB, extra=deny_env)
+up = wait_up(18004)
+lt = logtext(p)
+st = status(18004).get("storage", {})
+check("starts instead of crash-looping on a 403", bool(up))
+check("/api/status: degraded, reason provider_refused", st.get("state") == "degraded" and st.get("reason") == "provider_refused", str(st))
+check("explains the likely cause in plain words in the log", "HINT" in lt and "daily request cap" in lt)
+check("the provider's own error text is not echoed into the status", "Transaction cap" not in json.dumps(st))
+pid = analyze(18004) if up else None
+time.sleep(6)   # long enough for any replicator to have tried to write
+check("the denied provider saw ZERO writes (bucket untouched)", Deny.writes == 0, f"reads={Deny.reads} writes={Deny.writes}")
+check("NO replication process is running", not running("litestream", "replicate"))
+check("analysis still works while degraded", bool(pid and nodes(18004, pid)))
+stop(p)
+
+
+# ---------------------------------------------------------------- S10
+print("S10 a degraded run must not damage the real DB path or the backup history")
+clear_replica(); wipe_db(DB)
+p = start("s10a", 18020, DB); wait_up(18020)
+px = analyze(18020); time.sleep(3)
+stop(p)                                   # graceful: final sync, X is in the backup
+wipe_db(DB)                               # an ephemeral host loses its disk
+p = start("s10b", 18021, DB, extra=deny_env); wait_up(18021)   # provider refuses -> degraded
+py = analyze(18021)
+stop(p)
+check("after the degraded run the real DB path is still absent", not os.path.exists(DB))
+p = start("s10c", 18022, DB); up = wait_up(18022)                # provider is back
+check("next start restores the ORIGINAL backup (project X is back)", bool(up and px and nodes(18022, px)))
+check("what was saved while degraded is gone, as documented", not (py and nodes(18022, py)))
+stop(p)
+time.sleep(1)
+code, summary, ids = probe_replica()
+check("the backup itself still restores and still holds X", code == 0 and px in ids, summary)
+srv.shutdown()
 
 # ---------------------------------------------------------------- S7
 print("S7 hard kill (SIGKILL = OOM kill) - how much recent data can be lost?")

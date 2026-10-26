@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 from fastapi import HTTPException
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 _TRUE = {"1", "true", "yes", "on"}
 
@@ -118,3 +119,27 @@ def global_rate() -> tuple[int, int]:
 
 def max_projects() -> int:
     return _int_env("CODEMAP_MAX_PROJECTS", 5000)
+
+
+class HostCheckExceptHealth(TrustedHostMiddleware):
+    """TrustedHostMiddleware, except GET/HEAD /api/health skips the Host check.
+
+    Platform health checkers (Render's among them) address the container by its
+    private IP, not the public hostname. Starlette's check has no exceptions, so
+    the app answered its own platform with 400 and the deploy looped as
+    "unhealthy" while the app itself was fine.
+
+    Safe because the endpoint returns a constant: there is no Host-dependent
+    output to poison. The match is exact, so /api/health/, /api/healthz and POST
+    all keep the strict check.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        if (
+            scope["type"] == "http"
+            and scope["path"] == "/api/health"
+            and scope["method"] in ("GET", "HEAD")
+        ):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)

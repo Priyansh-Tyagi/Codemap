@@ -280,6 +280,13 @@ def fetch_github_repo(url: str, access_token: str | None = None) -> FetchedRepo:
 
         # GitHub tarballs contain exactly one top-level directory (e.g. "owner-repo-<sha>/")
         entries = [e for e in os.listdir(tmp_dir) if os.path.isdir(os.path.join(tmp_dir, e))]
+        if not entries:
+            # Only source and config files are unpacked, so a repository made of
+            # docs/markdown/images (e.g. a "best practices" README repo) leaves no
+            # top-level folder at all. That is not a GitHub problem; say what is true.
+            raise GitHubFetchError(
+                f"{owner}/{repo} has no JavaScript, TypeScript or Python files to analyze"
+            )
         if len(entries) != 1:
             raise GitHubFetchError("Unexpected tarball structure from GitHub")
 

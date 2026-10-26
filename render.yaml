@@ -17,9 +17,12 @@ services:
     # run side by side and both replicate to ONE bucket path; measured here: the OLD
     # instance's writes in that window are silently dropped (the backup stays valid).
     # Deploy by hand, when nobody is likely to be saving a project.
-    autoDeploy: false
+    autoDeployTrigger: "off"   # older blueprints call this `autoDeploy: false`; confirm in Settings > Build & Deploy
     envVars:
       # --- replication (see backend/docker/litestream.yml) ---
+      # Replication on. If the bucket provider refuses requests (e.g. B2's free daily cap),
+      # the app now starts DEGRADED on its own: no replication, bucket untouched, banner in
+      # the UI. Set this to "false" only to switch backups off on purpose.
       - key: LITESTREAM_ENABLED
         value: "true"
       - key: LITESTREAM_BUCKET
@@ -32,8 +35,12 @@ services:
         sync: false     # an application key limited to THIS bucket only
       - key: LITESTREAM_SECRET_ACCESS_KEY
         sync: false
+      # A FRESH folder for production, so nothing from local test runs can ever be
+      # restored into the live database. (Local tests used "codemap".)
       - key: LITESTREAM_PATH
-        value: codemap
+        value: prod
+      - key: LITESTREAM_FORCE_PATH_STYLE
+        value: "true"   # Backblaze B2 accepts path-style URLs; safe default
       # --- app ---
       - key: CODEMAP_DB_PATH
         value: /data/codemap.db
@@ -49,7 +56,7 @@ services:
       - key: CODEMAP_DISABLE_DOCS
         value: "true"
       - key: CODEMAP_ALLOWED_HOSTS
-        sync: false     # your API hostname, e.g. codemap-api.onrender.com
+        sync: false     # your API hostname only, e.g. codemap-api.onrender.com. /api/health is exempt from this check (platform health checkers use a private Host), every other path is enforced.
       - key: CODEMAP_ALLOWED_ORIGINS
         sync: false     # your deployed frontend URL, exactly
       - key: CODEMAP_COOKIE_SECURE
