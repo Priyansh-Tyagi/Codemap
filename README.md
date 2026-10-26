@@ -9,7 +9,7 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 **Live demo:** https://codemap-gold.vercel.app  
 *The backend runs on a free tier that sleeps when idle, so the first request after a quiet period can take about a minute to wake. After that it is fast.*
 
-![CodeMap home page](docs/screenshots/01-home.png)
+![CodeMap home page](screenshots/image.png)
 
 ---
 
@@ -32,11 +32,11 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 
 | | |
 |---|---|
-| ![Focus mode on a large project](docs/screenshots/02-focus-mode.png) | ![File details and change impact](docs/screenshots/03-impact.png) |
+| ![Focus mode on a large project](screenshots/image-1.png) | ![File details and change impact](screenshots/image-2.png) |
 | **Focus mode** on the FastAPI full-stack template: 5 of 152 files | **Risk score and change impact** for a selected file |
-| ![Circular dependency](docs/screenshots/04-cycle.png) | ![Guided tour](docs/screenshots/05-tour.png) |
+| ![Circular dependency](screenshots/image-3.png) | ![Guided tour](screenshots/image-4.png) |
 | **A circular dependency**, with the cycle-closing edge drawn distinctly | **Guided tour**: a deterministic reading order |
-| ![Light theme](docs/screenshots/06-light-theme.png) | ![Project overview](docs/screenshots/07-overview.png) |
+| ![Light theme](screenshots/image-5.png) | ![Project overview](screenshots/image-6.png) |
 | **Light theme** (dark is the default on dark-mode systems) | **Project stats** and architecture breakdown |
 
 ---
