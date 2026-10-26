@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FolderOpen, GitBranch, Loader2 } from "lucide-react";
 import Wordmark from "../components/Wordmark";
@@ -7,6 +7,7 @@ import ThemeToggle from "../components/ThemeToggle";
 import HeroGraph from "../components/HeroGraph";
 import { analyzeRepository, getServerConfig } from "../services/api";
 import { describeApiError } from "../utils/apiError";
+import { useServerStatusContext } from "../hooks/serverStatusContext";
 
 // Real, public repos that analyze well - so a visitor can see a result in
 // one click instead of having to find a repo first.
@@ -44,15 +45,46 @@ export default function HomePage() {
     };
   }, []);
 
-  async function handleAnalyze(e) {
+  // A sleeping free host answers nothing while it wakes, so a request sent now fails
+  // at once. Instead of showing an error, hold the analysis and start it by itself
+  // the moment the server answers (the app-level status check already knows when).
+  const server = useServerStatusContext();
+  const [waitingSource, setWaitingSource] = useState(null);
+  const runRef = useRef(null);
+  const giveUpRef = useRef(null);
+
+  useEffect(() => {
+    if (!waitingSource) return;
+    if (server.phase === "ready") runRef.current(waitingSource);
+    else if (server.phase === "unreachable") giveUpRef.current();
+  }, [waitingSource, server.phase]);
+
+  function giveUpWaiting() {
+    setWaitingSource(null);
+    setLoading(false);
+    setError("The server isn't responding. It may still be starting up, so try again in a moment.");
+  }
+
+  function handleAnalyze(e) {
     e.preventDefault();
     const value = inputValue.trim();
     if (!value) return;
 
     setLoading(true);
     setError(null);
+    const source = sourceMode === "github" ? { githubUrl: value, forceRefresh } : { path: value };
+    if (server.phase !== "ready") {
+      setWaitingSource(source);
+      return;
+    }
+    runAnalysis(source);
+  }
+
+  async function runAnalysis(source) {
+    setWaitingSource(null);   // no longer held: this is the real request
+    setLoading(true);
+    setError(null);
     try {
-      const source = sourceMode === "github" ? { githubUrl: value, forceRefresh } : { path: value };
       const result = await analyzeRepository(source);
       // The graph is NOT rendered here. Navigating to /p/:id makes the URL the
       // single source of truth, so a fresh analysis and a shared link behave
@@ -63,6 +95,9 @@ export default function HomePage() {
       setLoading(false);
     }
   }
+
+  runRef.current = runAnalysis;
+  giveUpRef.current = giveUpWaiting;
 
   function tryExample(slug) {
     setSourceMode("github");
@@ -118,7 +153,7 @@ export default function HomePage() {
                 className="inline-flex items-center justify-center gap-2 h-11 px-5 rounded-xl bg-accent text-accent-fg text-[14px] font-medium hover:opacity-90 disabled:opacity-50 transition-opacity whitespace-nowrap"
               >
                 {loading && <Loader2 size={15} className="animate-spin" aria-hidden="true" />}
-                {loading ? (sourceMode === "github" ? "Downloading…" : "Analyzing…") : "Analyze"}
+                {waitingSource ? "Waiting for server…" : loading ? (sourceMode === "github" ? "Downloading…" : "Analyzing…") : "Analyze"}
               </button>
             </div>
 
@@ -152,6 +187,11 @@ export default function HomePage() {
             ))}
           </div>
 
+          {waitingSource && (
+            <p role="status" className="mt-4 text-fg-soft text-[13px]">
+              Waking the server… your analysis will start automatically.
+            </p>
+          )}
           {authError && (
             <p role="alert" className="mt-4 text-danger text-[13px] break-words">{authError}</p>
           )}

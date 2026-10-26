@@ -173,3 +173,105 @@ describe("HomePage", () => {
     }
   });
 });
+
+
+// --- Analyze while the free host is still waking up ---------------------------------
+// Seen live: a request sent during the wake-up fails at once with no response, and
+// the page printed "is it running on port 8000?". The page now holds the analysis and
+// starts it by itself when the app-level status check says the server is up.
+import { ServerStatusContext, DEFAULT_SERVER_STATUS } from "../hooks/serverStatusContext";
+
+describe("HomePage: analyzing while the server wakes up", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getServerConfig.mockResolvedValue({ allowLocalPaths: false });
+  });
+
+  function tree(phase) {
+    return (
+      <ServerStatusContext.Provider value={{ ...DEFAULT_SERVER_STATUS, phase }}>
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/p/:projectId" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </ServerStatusContext.Provider>
+    );
+  }
+
+  async function submit(user, url = "https://github.com/pallets/flask") {
+    await user.type(await screen.findByLabelText("Repository source"), url);
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+  }
+
+  it("does not send the request while the server is waking, and says it is waiting", async () => {
+    const user = userEvent.setup();
+    render(tree("waking"));
+    await submit(user);
+
+    expect(analyzeRepository).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent(/analysis will start automatically/);
+    expect(screen.getByRole("button", { name: /Waiting for server/ })).toBeDisabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("starts the held analysis exactly once, with the original input, when the server is ready", async () => {
+    analyzeRepository.mockResolvedValue({ projectId: "p1", cached: false });
+    const user = userEvent.setup();
+    const { rerender } = render(tree("waking"));
+    await submit(user);
+    expect(analyzeRepository).not.toHaveBeenCalled();
+
+    rerender(tree("ready"));
+    await waitFor(() => expect(analyzeRepository).toHaveBeenCalledTimes(1));
+    expect(analyzeRepository).toHaveBeenCalledWith({ githubUrl: "https://github.com/pallets/flask", forceRefresh: false });
+    expect(await screen.findByTestId("probe")).toHaveTextContent("/p/p1");
+
+    rerender(tree("ready"));                 // a later re-render must not run it again
+    expect(analyzeRepository).toHaveBeenCalledTimes(1);
+  });
+
+  it("also holds a click made before the first status check has even started (idle)", async () => {
+    analyzeRepository.mockResolvedValue({ projectId: "p2" });
+    const user = userEvent.setup();
+    const { rerender } = render(tree("idle"));
+    await submit(user);
+    expect(analyzeRepository).not.toHaveBeenCalled();
+    rerender(tree("checking"));
+    expect(analyzeRepository).not.toHaveBeenCalled();
+    rerender(tree("ready"));
+    await waitFor(() => expect(analyzeRepository).toHaveBeenCalledTimes(1));
+  });
+
+  it("gives up with a clear message, and never sends the request, if the server never answers", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(tree("waking"));
+    await submit(user);
+    rerender(tree("unreachable"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/server isn't responding/);
+    expect(analyzeRepository).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled();     // can try again
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("sends immediately when the server is already up (no waiting, no extra note)", async () => {
+    analyzeRepository.mockResolvedValue({ projectId: "p3" });
+    const user = userEvent.setup();
+    render(tree("ready"));
+    await submit(user);
+    await waitFor(() => expect(analyzeRepository).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/analysis will start automatically/)).not.toBeInTheDocument();
+  });
+
+  it("surfaces a real failure after the server is up (the held request is not swallowed)", async () => {
+    analyzeRepository.mockRejectedValue({ response: { status: 400, data: { detail: "Branch or ref not found: x" } } });
+    const user = userEvent.setup();
+    const { rerender } = render(tree("waking"));
+    await submit(user);
+    rerender(tree("ready"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Branch or ref not found: x");
+    expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled();
+  });
+});

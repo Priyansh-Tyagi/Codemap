@@ -227,3 +227,42 @@ def test_two_top_level_directories_is_still_reported_as_a_bad_tarball(monkeypatc
     with patch("analyzer.github_fetcher.requests.get", side_effect=[metadata_resp, tarball_resp]):
         with pytest.raises(GitHubFetchError, match="Unexpected tarball structure"):
             fetch_github_repo("https://github.com/owner/repo")
+
+
+# --- the anonymous rate limit, as visitors (not operators) experience it ----
+# Seen live: the limit is per IP, and a shared free host's IP is shared with other
+# tenants, so visitors hit it constantly. The old message told THEM to "set a
+# GITHUB_TOKEN environment variable", which only the operator can do.
+
+def _rate_limited_response():
+    resp = _make_fake_response(403)
+    resp.headers = {"x-ratelimit-remaining": "0"}
+    return resp
+
+
+def test_anonymous_rate_limit_message_is_something_a_visitor_can_act_on(caplog):
+    with patch("analyzer.github_fetcher.requests.get", return_value=_rate_limited_response()):
+        with caplog.at_level("WARNING"):
+            with pytest.raises(GitHubFetchError) as err:
+                fetch_github_repo("https://github.com/owner/repo")
+    msg = str(err.value)
+    assert "rate limit" in msg and "Sign in with GitHub" in msg
+    assert "GITHUB_TOKEN" not in msg and "environment variable" not in msg
+
+
+def test_operator_hint_goes_to_the_log_not_the_visitor(caplog):
+    with patch("analyzer.github_fetcher.requests.get", return_value=_rate_limited_response()):
+        with caplog.at_level("WARNING"):
+            with pytest.raises(GitHubFetchError):
+                fetch_github_repo("https://github.com/owner/repo")
+    assert any("GITHUB_TOKEN" in r.getMessage() for r in caplog.records)
+
+
+def test_signed_in_rate_limit_message_names_the_account_and_does_not_tell_them_to_sign_in(caplog):
+    with patch("analyzer.github_fetcher.requests.get", return_value=_rate_limited_response()):
+        with caplog.at_level("WARNING"):
+            with pytest.raises(GitHubFetchError) as err:
+                fetch_github_repo("https://github.com/owner/repo", access_token="user-token")
+    assert "this account" in str(err.value)
+    assert "Sign in" not in str(err.value)
+    assert not any("GITHUB_TOKEN" in r.getMessage() for r in caplog.records)

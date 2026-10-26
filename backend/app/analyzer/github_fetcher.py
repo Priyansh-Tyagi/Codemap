@@ -137,12 +137,18 @@ def _get_repo_metadata(owner: str, repo: str, access_token: str | None = None) -
             f"your own private repos): {owner}/{repo}"
         )
     if resp.status_code == 403 and resp.headers.get("x-ratelimit-remaining") == "0":
+        if access_token:
+            raise GitHubFetchError("GitHub API rate limit reached for this account. Try again later.")
+        # Visitors see this text, so it must be something THEY can act on. The
+        # operator's fix (a server-wide GITHUB_TOKEN) goes to the log instead.
+        logging.getLogger(__name__).warning(
+            "GitHub anonymous rate limit (60/hour per IP) reached; set GITHUB_TOKEN "
+            "(a fine-grained, public-repo read-only token) to raise it to 5,000/hour"
+        )
         raise GitHubFetchError(
-            "GitHub API rate limit reached"
-            + (" for this account" if access_token else " for unauthenticated requests (60/hour per IP)")
-            + ". Try again later"
-            + ("." if access_token else ", sign in with GitHub, or set a GITHUB_TOKEN "
-                                          "environment variable to raise the limit to 5,000/hour.")
+            "GitHub API rate limit reached for anonymous requests. The limit is shared by all "
+            "visitors and resets every hour. Sign in with GitHub (free) to continue with your "
+            "own limit, or try again later."
         )
     if not resp.ok:
         raise GitHubFetchError(f"GitHub API error ({resp.status_code}) looking up {owner}/{repo}")

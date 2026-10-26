@@ -9,7 +9,7 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 **Live demo:** https://codemap-gold.vercel.app  
 *The backend runs on a free tier that sleeps when idle, so the first request after a quiet period can take about a minute to wake. After that it is fast.*
 
-![CodeMap home page](docs/screenshots/01-home.png)
+![CodeMap home page](screenshots/image.png.)
 
 ---
 
@@ -25,18 +25,18 @@ CodeMap maps every import in a JavaScript, TypeScript or Python repository into 
 - **Architecture classification** (Component, Service, Route, Test, Util, Hook, plus Django/Flask conventions) and filtering by category, risk level or folder.
 - **Shareable permanent links** (`/p/<id>`) backed by SQLite. Private-repo projects are visible only to the session that created them (a 404, never a 403, so existence isn't leaked).
 - **Sign in with GitHub** (optional): your own 5,000/hour API quota and access to your private repos.
-- **Honest about free hosting**: a sleeping server is woken the moment the page opens, with a "Waking the server" message and a timer instead of a frozen page; and if backup storage is offline, a banner says so and the share-link button warns that the link may not last.
+- **Honest about free hosting**: a sleeping server is woken the moment the page opens, with a "Waking the server" message and a timer instead of a frozen page, and an Analyze click made during the wake-up is held and starts by itself when the server answers (seen live: it used to fail with a developer-only error); and if backup storage is offline, a banner says so and the share-link button warns that the link may not last.
 - **Light and dark themes**, file tree with search, imports/symbols panel.
 
 ### Screenshots
 
 | | |
 |---|---|
-| ![Focus mode on a large project](docs/screenshots/02-focus-mode.png) | ![File details and change impact](docs/screenshots/03-impact.png) |
+| ![Focus mode on a large project](screenshots/image-1.png) | ![File details and change impact](screenshots/image-2.png) |
 | **Focus mode** on the FastAPI full-stack template: 5 of 152 files | **Risk score and change impact** for a selected file |
-| ![Circular dependency](docs/screenshots/04-cycle.png) | ![Guided tour](docs/screenshots/05-tour.png) |
+| ![Circular dependency](screenshots/image-3.png) | ![Guided tour](screenshots/image-4.png) |
 | **A circular dependency**, with the cycle-closing edge drawn distinctly | **Guided tour**: a deterministic reading order |
-| ![Light theme](docs/screenshots/06-light-theme.png) | ![Project overview](docs/screenshots/07-overview.png) |
+| ![Light theme](screenshots/image-5.png) | ![Project overview](screenshots/image-6.png) |
 | **Light theme** (dark is the default on dark-mode systems) | **Project stats** and architecture breakdown |
 
 ---
@@ -240,8 +240,8 @@ Also in place: Origin check on state-changing requests, locked-down CORS (wildca
 
 | Suite | Count | Run |
 |---|---|---|
-| Backend (pytest) | 450 | `cd backend && python -m pytest tests\ -q` |
-| Frontend (Vitest + Testing Library) | 152 | `cd frontend && npm test` |
+| Backend (pytest) | 453 | `cd backend && python -m pytest tests\ -q` |
+| Frontend (Vitest + Testing Library) | 163 | `cd frontend && npm test` |
 | Replication drill (real Litestream) | 34 checks | `python backend/docker/e2e_replication.py` (Linux or inside the image) |
 
 The backend suite covers the scanner, both parsers and resolvers, the graph engine, risk scoring, the GitHub fetcher (mocked, network-independent), SQLite persistence across real process boundaries, OAuth and private-repo access control across every read route, the CLI as a subprocess, the guided tour, and the deployment files themselves. Tests are isolated from the developer's environment: secrets and limits are stripped, and any un-mocked real HTTP call raises.
@@ -266,6 +266,7 @@ Most of the interesting engineering came from real repositories, not the demos:
 - **The S3 backup config uploaded nothing.** `part-size: 5MB` is read as 5,000,000 bytes, below S3's 5 MiB minimum, so every upload failed while the app ran normally. Found only by running the config against an S3-compatible server; now pinned by a test.
 - **The service took itself down with its own backups.** Litestream's default timers listed the bucket ~650 times an hour, the free provider's daily cap tripped, and every request (including the startup restore) got a 403. Found in production; fixed by measuring each timer's cost, slowing them ~20x, and teaching the entrypoint to explain a 403 and back off instead of looping.
 - **"Fail closed" was too blunt.** After the cap incident the entrypoint refused to start on an unreadable backup, which kept the data safe but took the whole site down. The real invariant is "never replicate a fresh database over existing history", so it now starts degraded with replication off. Building that exposed a second hazard: with a persistent volume, a fresh database left at the real path would look healthy to the next start and be replicated over the backup, so the degraded run uses its own file, with a drill scenario that proves the original backup restores afterwards.
+- **A free host answers nothing while it wakes, so the first Analyze click failed** with a message about "port 8000". The page now holds the request until the server answers, gateway errors read as "starting up" instead of a code bug, and the rate-limit error no longer tells visitors to set an environment variable only the operator can set.
 - **The app failed its own platform's health check.** Host-header protection rejected the platform's private-address probe with a 400. Fixed by exempting exactly `GET`/`HEAD /api/health`, with tests that every other path stays strict.
 
 ---
@@ -281,6 +282,7 @@ Most of the interesting engineering came from real repositories, not the demos:
 
 **Deployment limits**
 - Free-tier request caps are real: the B2 free tier allows 2,500 list-type calls a day. Idle cost is now ~30 an hour awake, plus ~33 per restore; watch B2's Caps & Alerts page after deploys.
+- **GitHub's anonymous API limit is 60 an hour per IP**, and a shared free host's IP is shared with other tenants (seen live: it ran out, and only signed-in visitors could analyze). Set `GITHUB_TOKEN` to a fine-grained, public-repositories read-only token (5,000/hour, shared by all visitors; private repos stay refused for it by design). Visitors see an actionable message (sign in, or wait for the hourly reset); the operator hint is logged.
 - The storage banner reflects the state at **startup**. If replication fails later in a run (for example a cap hit mid-session) nothing tells the UI yet.
 - Single instance only; free-tier cold starts take about a minute; replication lag means a hard kill can lose the last 1-2 seconds of writes.
 - Free instances may have far less CPU than a laptop, so large analyses can be noticeably slower than the local numbers above.
@@ -310,7 +312,7 @@ backend/
   app/          FastAPI app: analyzer/ (scan, parse, resolve), graph/ (engine, tour), services/ (store, security), api/
   parser/       Node + Babel import extractor (one-shot subprocess)
   docker/       entrypoint, Litestream configs, replication drill
-  tests/        450 tests
+  tests/        453 tests
   Dockerfile
 frontend/       React + Vite + Tailwind v4 + React Flow + dagre (Geist / Geist Mono)
 examples/       demo repos and edge-case fixtures

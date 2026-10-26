@@ -73,7 +73,13 @@ services:
         sync: false
       - key: CODEMAP_GITHUB_CLIENT_SECRET
         sync: false
+      # RECOMMENDED. Without it every anonymous analysis shares GitHub's 60/hour limit per
+      # IP, and on a shared free host that IP is shared with other tenants (seen live: the
+      # limit ran out and visitors without a GitHub sign-in could not analyze anything).
+      # Create a FINE-GRAINED token with "Public repositories (read-only)" and NO other
+      # permissions; 5,000/hour is then shared by all visitors. Private repos stay refused
+      # for the shared token by design.
       - key: GITHUB_TOKEN
-        sync: false     # optional; fine-grained, PUBLIC-repo read only
+        sync: false
       - key: GEMINI_API_KEY
         sync: false     # optional
